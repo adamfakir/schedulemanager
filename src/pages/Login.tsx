@@ -26,6 +26,7 @@ function Login() {
             .then(() => {
                 // Token is valid
                 navigate("/home");
+
             })
             .catch(() => {
                 // Invalid token, ignore
@@ -50,6 +51,7 @@ function Login() {
         failed = false
         localStorage.setItem("user_token", token);
         navigate("/home");
+        window.location.reload();
         } catch (err: any) {
             const message = err?.response?.data?.error || "Login failed. Please try again.";
 
