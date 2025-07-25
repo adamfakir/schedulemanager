@@ -28,10 +28,10 @@ import {
     ModalBody,
     ModalCloseButton, ModalHeader, ModalOverlay, InputGroup, InputLeftElement, Collapse, Divider, Switch
 } from '@chakra-ui/react';
-import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, EditIcon} from "@chakra-ui/icons";
+import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, EditIcon, CopyIcon} from "@chakra-ui/icons";
 import {FaThumbtack} from "react-icons/fa";
 import { useNavigate } from 'react-router-dom';
-const API_BASE = "https://schedulemanagerbackend.onrender.com";
+const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app/";
 
 interface User {
     full_name: string;
@@ -142,6 +142,7 @@ function Subjects() {
     const [showMoreDPN, setShowMoreDPN] = useState(false);
     const [currentSubject, setCurrentSubject] = useState<any>(null);
     const [pinnedSubjectIds, setPinnedSubjectIds] = useState<string[]>([]);
+    const [duplicateTimeblocks, setDuplicateTimeblocks] = useState(false);
     const navigate = useNavigate();
     useEffect(() => {
         const storedPinned = localStorage.getItem('pinned_subject_ids');
@@ -256,7 +257,28 @@ function Subjects() {
     };
     const handleSubmit = () => {
         const token = localStorage.getItem("user_token");
-        const data = {...currentSubject};
+        const data = { ...currentSubject };
+        // Remove frontend-only fields before sending to backend
+        delete data._id;
+        delete data._originalId;
+        // Remove orgid if it's not a string (e.g., if it's an object or undefined)
+        if (typeof data.orgid !== 'string') {
+            delete data.orgid;
+        }
+        // Convert timeblocks to correct backend format
+        if (Array.isArray(data.timeblocks)) {
+            data.timeblocks = data.timeblocks.map((tb: any) => {
+                if (tb.start && tb.end) {
+                    return {
+                        startday: tb.start.day,
+                        starttime: tb.start.time,
+                        endday: tb.end.day,
+                        endtime: tb.end.time
+                    };
+                }
+                return tb;
+            });
+        }
 
         const request = isEditMode
             ? axios.put(`${API_BASE}/subject/${currentSubject._id.$oid}/update`, data, {
@@ -267,6 +289,33 @@ function Subjects() {
             });
 
         request
+            .then((response) => {
+                console.log("Subject created:", response.data);
+                // If duplicating and timeblocks should be copied, fetch the original subject's timeblocks
+                if (!isEditMode && duplicateTimeblocks && currentSubject._originalId) {
+                    console.log("Attempting to copy timeblocks from:", currentSubject._originalId);
+                    return axios.get(`${API_BASE}/subject/${currentSubject._originalId}`, {
+                        headers: {Authorization: token},
+                    }).then((originalRes) => {
+                        console.log("Original subject fetched:", originalRes.data);
+                        const originalSubject = originalRes.data;
+                        if (originalSubject.timeblocks && originalSubject.timeblocks.length > 0) {
+                            // Copy timeblocks to the new subject
+                            // Backend returns "sbujcet_id" (with typo) as a string
+                            const newSubjectId = response.data.sbujcet_id || response.data._id?.$oid || response.data._id;
+                            console.log("Copying timeblocks to new subject:", newSubjectId);
+                            return axios.put(`${API_BASE}/subject/${newSubjectId}/update`, {
+                                timeblocks: originalSubject.timeblocks
+                            }, {
+                                headers: {Authorization: token},
+                            });
+                        }
+                    }).catch((err) => {
+                        console.error("Failed to copy timeblocks:", err);
+                        // Continue even if timeblock copying fails
+                    });
+                }
+            })
             .then(() => {
                 onClose();
                 // reload subjects
@@ -454,6 +503,30 @@ function Subjects() {
                                                             onClick={(e) =>{e.stopPropagation(); handleDelete(subject._id.$oid)}}
                                                         />
                                                     </Tooltip>
+                                                    <Tooltip label="Duplicate">
+                                                        <IconButton
+                                                            aria-label="Duplicate"
+                                                            icon={<CopyIcon />}
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            colorScheme="purple"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation(); 
+                                                                console.log("Original subject for duplication:", subject);
+                                                                setIsEditMode(false);
+                                                                const originalId = subject._id?.$oid || subject._id;
+                                                                console.log("Original ID extracted:", originalId);
+                                                                setCurrentSubject({
+                                                                    ...subject,
+                                                                    name: `${subject.name} (Copy)`,
+                                                                    _id: undefined, // Remove the ID so it creates a new one
+                                                                    _originalId: originalId // Store original ID for timeblock copying
+                                                                });
+                                                                setDuplicateTimeblocks(false);
+                                                                onOpen();
+                                                            }}
+                                                        />
+                                                    </Tooltip>
                                                 </HStack>
                                             </HStack>
                                         </Box>
@@ -513,6 +586,30 @@ function Subjects() {
                                                             onClick={(e) => {e.stopPropagation(); handleDelete(subject._id.$oid)}}
                                                         />
                                                     </Tooltip>
+                                                    <Tooltip label="Duplicate">
+                                                        <IconButton
+                                                            aria-label="Duplicate"
+                                                            icon={<CopyIcon />}
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            colorScheme="purple"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation(); 
+                                                                console.log("Original subject for duplication:", subject);
+                                                                setIsEditMode(false);
+                                                                const originalId = subject._id?.$oid || subject._id;
+                                                                console.log("Original ID extracted:", originalId);
+                                                                setCurrentSubject({
+                                                                    ...subject,
+                                                                    name: `${subject.name} (Copy)`,
+                                                                    _id: undefined, // Remove the ID so it creates a new one
+                                                                    _originalId: originalId // Store original ID for timeblock copying
+                                                                });
+                                                                setDuplicateTimeblocks(false);
+                                                                onOpen();
+                                                            }}
+                                                        />
+                                                    </Tooltip>
                                                 </HStack>
                                             </HStack>
                                         </Box>
@@ -526,7 +623,9 @@ function Subjects() {
             <Modal isOpen={isOpen} onClose={onClose}>
                 <ModalOverlay/>
                 <ModalContent>
-                    <ModalHeader>{isEditMode ? "Edit Subject" : "Create Subject"}</ModalHeader>
+                    <ModalHeader>
+                        {isEditMode ? "Edit Subject" : (currentSubject?._originalId ? "Duplicate Subject" : "Create Subject")}
+                    </ModalHeader>
                     <ModalCloseButton/>
                     <ModalBody>
                         <VStack spacing={5}>
@@ -955,6 +1054,22 @@ function Subjects() {
                                     }
                                 />
                             </HStack>
+
+                            {/* Show timeblock duplication option only when duplicating */}
+                            {!isEditMode && currentSubject?._originalId && (
+                                <>
+                                    <Divider orientation='horizontal'/>
+                                    <HStack justify="space-between" w="100%">
+                                        <Text fontWeight="bold" fontSize={17}>Duplicate Timeblocks</Text>
+                                        <Switch
+                                            colorScheme="blue"
+                                            size={"md"}
+                                            isChecked={duplicateTimeblocks}
+                                            onChange={(e) => setDuplicateTimeblocks(e.target.checked)}
+                                        />
+                                    </HStack>
+                                </>
+                            )}
 
                         </VStack>
                     </ModalBody>

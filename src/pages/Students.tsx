@@ -28,10 +28,10 @@ import {
     ModalBody,
     ModalCloseButton, ModalHeader, ModalOverlay, InputGroup, InputLeftElement, Collapse, Divider, Switch
 } from '@chakra-ui/react';
-import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, EditIcon} from "@chakra-ui/icons";
+import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, EditIcon, CopyIcon} from "@chakra-ui/icons";
 import {FaThumbtack} from "react-icons/fa";
 import { useNavigate } from 'react-router-dom';
-const API_BASE = "https://schedulemanagerbackend.onrender.com";
+const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app/";
 
 interface User {
     full_name: string;
@@ -174,6 +174,11 @@ function Students() {
     const handleSubmit = () => {
         const token = localStorage.getItem("user_token");
         const data = {...currentStudent};
+        delete data._id;
+        // Remove orgid if it's not a string (e.g., if it's an object or undefined)
+        if (typeof data.orgid !== 'string') {
+            delete data.orgid;
+        }
 
         const request = isEditMode
             ? axios.put(`${API_BASE}/student/${currentStudent._id.$oid}/update`, data, {
@@ -358,6 +363,26 @@ function Students() {
                                                             onClick={(e) => {e.stopPropagation(); handleDelete(student._id.$oid)}}
                                                         />
                                                     </Tooltip>
+                                                    <Tooltip label="Duplicate">
+                                                        <IconButton
+                                                            aria-label="Duplicate"
+                                                            icon={<CopyIcon />}
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            colorScheme="purple"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setIsEditMode(false);
+                                                                setCurrentStudent({
+                                                                    ...student,
+                                                                    _id: undefined,
+                                                                    name: `${student.name} (Copy)`,
+                                                                    required_classes: (student.required_classes || []).map((s: any) => s.$oid || s),
+                                                                });
+                                                                onOpen();
+                                                            }}
+                                                        />
+                                                    </Tooltip>
                                                 </HStack>
                                             </HStack>
                                         </Box>
@@ -418,6 +443,26 @@ function Students() {
                                                             size="sm"
                                                             colorScheme="red"
                                                             onClick={(e) => {e.stopPropagation(); handleDelete(student._id.$oid)}}
+                                                        />
+                                                    </Tooltip>
+                                                    <Tooltip label="Duplicate">
+                                                        <IconButton
+                                                            aria-label="Duplicate"
+                                                            icon={<CopyIcon />}
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            colorScheme="purple"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setIsEditMode(false);
+                                                                setCurrentStudent({
+                                                                    ...student,
+                                                                    _id: undefined,
+                                                                    name: `${student.name} (Copy)`,
+                                                                    required_classes: (student.required_classes || []).map((s: any) => s.$oid || s),
+                                                                });
+                                                                onOpen();
+                                                            }}
                                                         />
                                                     </Tooltip>
                                                 </HStack>

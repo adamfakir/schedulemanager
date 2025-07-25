@@ -28,10 +28,10 @@ import {
     ModalBody,
     ModalCloseButton, ModalHeader, ModalOverlay, InputGroup, InputLeftElement, Collapse, Divider, Switch
 } from '@chakra-ui/react';
-import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, EditIcon} from "@chakra-ui/icons";
+import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, EditIcon, CopyIcon} from "@chakra-ui/icons";
 import {FaThumbtack} from "react-icons/fa";
 import { useNavigate } from 'react-router-dom';
-const API_BASE = "https://schedulemanagerbackend.onrender.com";
+const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app/";
 
 interface User {
     full_name: string;
@@ -55,6 +55,7 @@ function Teachers() {
     const [showMoreMPL, setShowMoreMPL] = useState(false);
     const [currentTeacher, setCurrentTeacher] = useState<any>(null);
     const [pinnedTeacherIds, setPinnedTeacherIds] = useState<string[]>([]);
+    const [duplicateAvailability, setDuplicateAvailability] = useState(false);
     const [allSubjects, setAllSubjects] = useState<any[]>([]);
     const [subjectSearch, setSubjectSearch] = useState("");
     const [subjectFilterMode, setSubjectFilterMode] = useState<"all" | "can_teach" | "required">("all");
@@ -176,6 +177,30 @@ function Teachers() {
     const handleSubmit = () => {
         const token = localStorage.getItem("user_token");
         const data = {...currentTeacher};
+        // Remove _id before sending
+        delete data._id;
+        // Remove orgid if it's not a string (e.g., if it's an object or undefined)
+        if (typeof data.orgid !== 'string') {
+            delete data.orgid;
+        }
+        // Handle duplicate availability
+        if (!isEditMode && currentTeacher?.name?.endsWith('(Copy)')) {
+            if (duplicateAvailability && Array.isArray(data.availability)) {
+                data.availability = data.availability.map((tb: any) => {
+                    if (tb.start && tb.end) {
+                        return {
+                            startday: tb.start.day,
+                            starttime: tb.start.time,
+                            endday: tb.end.day,
+                            endtime: tb.end.time
+                        };
+                    }
+                    return tb;
+                });
+            } else {
+                data.availability = [];
+            }
+        }
 
         const request = isEditMode
             ? axios.put(`${API_BASE}/teacher/${currentTeacher._id.$oid}/update`, data, {
@@ -361,6 +386,28 @@ function Teachers() {
                                                             onClick={(e) => {e.stopPropagation(); handleDelete(teacher._id.$oid)}}
                                                         />
                                                     </Tooltip>
+                                                    <Tooltip label="Duplicate">
+                                                        <IconButton
+                                                            aria-label="Duplicate"
+                                                            icon={<CopyIcon />}
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            colorScheme="purple"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setIsEditMode(false);
+                                                                setCurrentTeacher({
+                                                                    ...teacher,
+                                                                    _id: undefined,
+                                                                    name: `${teacher.name} (Copy)`,
+                                                                    can_teach: (teacher.can_teach || []).map((s: any) => s.$oid || s),
+                                                                    required_teach: (teacher.required_teach || []).map((s: any) => s.$oid || s),
+                                                                });
+                                                                setDuplicateAvailability(false);
+                                                                onOpen();
+                                                            }}
+                                                        />
+                                                    </Tooltip>
                                                 </HStack>
                                             </HStack>
                                         </Box>
@@ -423,6 +470,28 @@ function Teachers() {
                                                             size="sm"
                                                             colorScheme="red"
                                                             onClick={(e) => {e.stopPropagation(); handleDelete(teacher._id.$oid)}}
+                                                        />
+                                                    </Tooltip>
+                                                    <Tooltip label="Duplicate">
+                                                        <IconButton
+                                                            aria-label="Duplicate"
+                                                            icon={<CopyIcon />}
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            colorScheme="purple"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setIsEditMode(false);
+                                                                setCurrentTeacher({
+                                                                    ...teacher,
+                                                                    _id: undefined,
+                                                                    name: `${teacher.name} (Copy)`,
+                                                                    can_teach: (teacher.can_teach || []).map((s: any) => s.$oid || s),
+                                                                    required_teach: (teacher.required_teach || []).map((s: any) => s.$oid || s),
+                                                                });
+                                                                setDuplicateAvailability(false);
+                                                                onOpen();
+                                                            }}
                                                         />
                                                     </Tooltip>
                                                 </HStack>
@@ -680,6 +749,19 @@ function Teachers() {
                                 </Box>
                             </HStack>
                             <Divider orientation='horizontal'/>
+
+                            {/* Show duplicate availability option only when duplicating */}
+                            {!isEditMode && currentTeacher?.name?.endsWith('(Copy)') && (
+                                <HStack justify="space-between" w="100%">
+                                    <Text fontWeight="bold" fontSize={17}>Duplicate Availability</Text>
+                                    <Switch
+                                        colorScheme="blue"
+                                        size={"md"}
+                                        isChecked={duplicateAvailability}
+                                        onChange={(e) => setDuplicateAvailability(e.target.checked)}
+                                    />
+                                </HStack>
+                            )}
 
                             <Text fontWeight="bold" fontSize={17}>*Availability times can be put on their schedule*</Text>
 

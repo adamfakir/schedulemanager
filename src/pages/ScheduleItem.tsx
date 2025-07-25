@@ -5,8 +5,9 @@ import axios from 'axios';
 import {getDraggedSubjectData, getDraggedSubjectId, setDraggedSubjectId, setDraggedSubjectData} from '../utils/dragSubjectStore';
 import { useRef } from 'react';
 import { AvailabilityContext } from '../utils/AvailabilityContext';
+import { teacherCacheGlobal, subjectCacheGlobal } from '../utils/globalCache';
 
-const API_BASE = "https://schedulemanagerbackend.onrender.com";
+const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app/";
 
 let currentDraggedSubjectId: string | null = null;
 const timeToMinutes = (time: string) => {
@@ -23,6 +24,24 @@ const minutesToTime = (min: number) => {
     return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
 };
 
+// Helper to update the subject cache after a subject's timeblocks change
+async function updateSubjectCacheFromBackend(subjectId: string) {
+    const token = localStorage.getItem('user_token');
+    if (!subjectCacheGlobal.current) return;
+    try {
+        const res = await axios.get(`${API_BASE}/subject/${subjectId}`, {
+            headers: { Authorization: token }
+        });
+        const updated = res.data;
+        const idx = subjectCacheGlobal.current.findIndex((s: any) => (s._id?.$oid || s._id) === subjectId);
+        if (idx !== -1) {
+            subjectCacheGlobal.current[idx] = updated;
+        }
+    } catch (err) {
+        // fallback: do nothing
+    }
+}
+
 function ScheduleItem() {
     const { id } = useParams();
     const [item, setItem] = useState<any>(null);
@@ -34,9 +53,16 @@ function ScheduleItem() {
     const hoverTimeout = useRef<NodeJS.Timeout | null>(null);
     const [selectedBlockIndex, setSelectedBlockIndex] = useState<number | null>(null);
     const [shiftHeld, setShiftHeld] = useState(false);
+    const [cmdHeld, setCmdHeld] = useState(false);
     const [stableHoverTime, setStableHoverTime] = useState<string | null>(null);
     const { availability } = useContext(AvailabilityContext);
     const [draggedTeacherBusy, setDraggedTeacherBusy] = useState<TimeBlock[]>([]);
+    const [overlappingTeacherSchedules, setOverlappingTeacherSchedules] = useState<any[]>([]);
+    const [swapReplaceHover, setSwapReplaceHover] = useState<{
+        blockIndex: number;
+        side: 'swap' | 'replace';
+    } | null>(null);
+    const [draggedBlockIndex, setDraggedBlockIndex] = useState<number | null>(null);
     const teacherCacheRef = useRef<any[] | null>(null);
     const computeBusyRanges = (availability: TimeBlock[]): TimeBlock[] => {
         const busyRanges: TimeBlock[] = [];
@@ -94,50 +120,186 @@ function ScheduleItem() {
             setDraggedTeacherBusy([]);
             return;
         }
-
-        const token = localStorage.getItem("user_token");
-
-        try {
-            // Use cache if available
-
-
-            const subjectTeacherNames = subject.teachers;
-            let allTeachers = teacherCacheRef.current;
-
-            if (!allTeachers) {
-                const res = await axios.get(`${API_BASE}/teacher/all_org_teachers`, {
-                    headers: { Authorization: token }
+        // Use global cache
+        const allTeachers = teacherCacheGlobal.current;
+        if (!allTeachers) { setDraggedTeacherBusy([]); return; }
+        const subjectTeacherNames = subject.teachers;
+        const matched = (allTeachers ?? []).filter((t: any) =>
+            subjectTeacherNames.includes(t.displayname) ||
+            subjectTeacherNames.includes(t.name)
+        );
+        const busy: TimeBlock[] = [];
+        for (const t of matched) {
+            const avail = t.availability || [];
+            if (avail.length === 0) {
+                ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'].forEach(day => {
+                    busy.push({ start: { day, time: '00:00' }, end: { day, time: '23:59' } });
                 });
-                allTeachers = res.data;
-                teacherCacheRef.current = allTeachers;
+            } else {
+                busy.push(...computeBusyRanges(avail));
             }
+        }
+        setDraggedTeacherBusy(busy);
+    };
 
-// ✅ TypeScript now knows it's definitely not null
-            const matched = (allTeachers ?? []).filter((t: any) =>
-                subjectTeacherNames.includes(t.displayname) ||
-                subjectTeacherNames.includes(t.name)
+    const fetchOverlappingTeacherSchedules = async (subject: any) => {
+        if (item?.type !== "Student" || !subject.teachers?.length) {
+            setOverlappingTeacherSchedules([]);
+            return;
+        }
+        // Use global cache
+        const allTeachers = teacherCacheGlobal.current;
+        const allSubjects = subjectCacheGlobal.current;
+        if (!allTeachers || !allSubjects) { setOverlappingTeacherSchedules([]); return; }
+        const subjectTeacherNames = subject.teachers;
+        const matched = (allTeachers ?? []).filter((t: any) =>
+            subjectTeacherNames.includes(t.displayname) ||
+            subjectTeacherNames.includes(t.name)
+        );
+        const overlappingBlocks: any[] = [];
+        for (const teacher of matched) {
+            // Get teacher's schedule by filtering cached subjects
+            const subjectIdSet = new Set(
+                [...(teacher.required_teach || []), ...(teacher.can_teach || [])].map(sid => sid.$oid || sid)
             );
-
-            const busy: TimeBlock[] = [];
-
-            for (const t of matched) {
-                const avail = t.availability || [];
-                if (avail.length === 0) {
-                    ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'].forEach(day => {
-                        busy.push({ start: { day, time: '00:00' }, end: { day, time: '23:59' } });
-                    });
-                } else {
-                    busy.push(...computeBusyRanges(avail));
-                }
+            const uniqueSubjectIds = Array.from(subjectIdSet);
+            for (const subjId of uniqueSubjectIds) {
+                const subj = allSubjects.find((s: any) => (s._id?.$oid || s._id) === subjId);
+                if (!subj) continue;
+                subj.timeblocks?.forEach((tb: any) =>
+                    overlappingBlocks.push({
+                        subjectId: subj._id.$oid || subj._id,
+                        ...tb,
+                        color: subj.color,
+                        name: subj.displayname || subj.name,
+                        displayclass: subj.displayclass, // ensure displayclass is included
+                        teacherName: teacher.displayname || teacher.name,
+                        opacity: 0.5
+                    })
+                );
             }
+        }
+        setOverlappingTeacherSchedules(overlappingBlocks);
+    };
 
-            setDraggedTeacherBusy(busy);
+    const handleSwapBlocks = async (draggedBlockIndex: number, targetBlockIndex: number) => {
+        const draggedBlock = timeblocks[draggedBlockIndex];
+        const targetBlock = timeblocks[targetBlockIndex];
+
+        // Swap the start and end times
+        const newTimeblocks = [...timeblocks];
+        newTimeblocks[draggedBlockIndex] = {
+            ...draggedBlock,
+            start: targetBlock.start,
+            end: targetBlock.end
+        };
+        newTimeblocks[targetBlockIndex] = {
+            ...targetBlock,
+            start: draggedBlock.start,
+            end: draggedBlock.end
+        };
+
+        setTimeblocks(newTimeblocks);
+
+        // Update both subjects in the backend
+        const token = localStorage.getItem("user_token");
+        try {
+            // Update dragged subject
+            await axios.put(`${API_BASE}/subject/${draggedBlock.subjectId}/update`, {
+                timeblocks: newTimeblocks
+                    .filter(tb => tb.subjectId === draggedBlock.subjectId)
+                    .map(tb => ({
+                        startday: tb.start.day,
+                        starttime: tb.start.time,
+                        endday: tb.end.day,
+                        endtime: tb.end.time,
+                    }))
+            }, { headers: { Authorization: token } });
+
+            // Update target subject
+            await axios.put(`${API_BASE}/subject/${targetBlock.subjectId}/update`, {
+                timeblocks: newTimeblocks
+                    .filter(tb => tb.subjectId === targetBlock.subjectId)
+                    .map(tb => ({
+                        startday: tb.start.day,
+                        starttime: tb.start.time,
+                        endday: tb.end.day,
+                        endtime: tb.end.time,
+                    }))
+            }, { headers: { Authorization: token } });
         } catch (err) {
-            console.error("❌ Failed to fetch teacher availability:", err);
-            setDraggedTeacherBusy([]);
+            console.error("❌ Failed to swap blocks:", err);
         }
     };
-    const busyRanges = item?.type === "Teacher" ? computeBusyRanges(availability) : [];
+
+    const handleReplaceBlock = async (draggedBlockIndex: number, targetBlockIndex: number) => {
+        const draggedBlock = timeblocks[draggedBlockIndex];
+        const targetBlock = timeblocks[targetBlockIndex];
+
+        // Remove the target block and add the dragged block to target's subject
+        const newTimeblocks = timeblocks.filter((_, idx) => idx !== targetBlockIndex);
+        
+        // Update the dragged block to have the target's position
+        const updatedDraggedBlock = {
+            ...draggedBlock,
+            start: targetBlock.start,
+            end: targetBlock.end
+        };
+
+        // Find the index of the dragged block in the new array
+        const newDraggedIndex = newTimeblocks.findIndex((_, idx) => 
+            idx === draggedBlockIndex || (idx > draggedBlockIndex && idx - 1 === draggedBlockIndex)
+        );
+        
+        if (newDraggedIndex !== -1) {
+            newTimeblocks[newDraggedIndex] = updatedDraggedBlock;
+        }
+
+        setTimeblocks(newTimeblocks);
+
+        // Update both subjects in the backend
+        const token = localStorage.getItem("user_token");
+        try {
+            // Update dragged subject (add the new position)
+            const draggedSubjectBlocks = newTimeblocks
+                .filter(tb => tb.subjectId === draggedBlock.subjectId)
+                .map(tb => ({
+                    startday: tb.start.day,
+                    starttime: tb.start.time,
+                    endday: tb.end.day,
+                    endtime: tb.end.time,
+                }));
+            
+            await axios.put(`${API_BASE}/subject/${draggedBlock.subjectId}/update`, {
+                timeblocks: draggedSubjectBlocks
+            }, { headers: { Authorization: token } });
+
+            // Update target subject (remove the old block)
+            const targetSubjectBlocks = newTimeblocks
+                .filter(tb => tb.subjectId === targetBlock.subjectId)
+                .map(tb => ({
+                    startday: tb.start.day,
+                    starttime: tb.start.time,
+                    endday: tb.end.day,
+                    endtime: tb.end.time,
+                }));
+            
+            await axios.put(`${API_BASE}/subject/${targetBlock.subjectId}/update`, {
+                timeblocks: targetSubjectBlocks
+            }, { headers: { Authorization: token } });
+        } catch (err) {
+            console.error("❌ Failed to replace block:", err);
+        }
+    };
+    // For teacher view, use cached teacher data for availability if possible
+    let teacherAvailability = availability;
+    if (item?.type === "Teacher" && teacherCacheGlobal.current) {
+        const cached = teacherCacheGlobal.current.find((t: any) => (t._id?.$oid || t._id) === (item._id?.$oid || item._id));
+        if (cached && cached.availability) {
+            teacherAvailability = cached.availability;
+        }
+    }
+    const busyRanges = item?.type === "Teacher" ? computeBusyRanges(teacherAvailability) : [];
     const [editingBlock, setEditingBlock] = useState<{
         index: number;
         start: string;
@@ -147,14 +309,39 @@ function ScheduleItem() {
     const stableSortedTimesRef = useRef<string[]>([]);
 
     useEffect(() => {
-        const handle = (e: KeyboardEvent) => setShiftHeld(e.shiftKey);
+        const handle = (e: KeyboardEvent) => {
+            setShiftHeld(e.shiftKey);
+            setCmdHeld(e.metaKey); // Cmd key on Mac, Ctrl on Windows/Linux
+        };
         window.addEventListener("keydown", handle);
         window.addEventListener("keyup", handle);
         return () => {
             window.removeEventListener("keydown", handle);
             window.removeEventListener("keyup", handle);
         };
-    }, []);    const [resizing, setResizing] = useState<{
+    }, []);
+
+    // Handle Cmd key changes for overlapping teacher schedules
+    useEffect(() => {
+        if (cmdHeld && hoverSubject && item?.type === "Student") {
+            // Use a more efficient approach - don't block the UI
+            setTimeout(() => {
+                if (cmdHeld && hoverSubject) { // Double check in case state changed
+                    fetchOverlappingTeacherSchedules(hoverSubject);
+                }
+            }, 0);
+        } else if (!cmdHeld) {
+            setOverlappingTeacherSchedules([]);
+        }
+    }, [cmdHeld, hoverSubject, item?.type]);
+
+    // Clear teacher busy state when not dragging
+    useEffect(() => {
+        if (!dragHover && !swapReplaceHover && !draggedBlockIndex) {
+            setDraggedTeacherBusy([]);
+        }
+    }, [dragHover, swapReplaceHover, draggedBlockIndex]);
+    const [resizing, setResizing] = useState<{
         blockIndex: number;
         direction: "top"|"bottom";
         day: string;
@@ -215,6 +402,7 @@ function ScheduleItem() {
                     { timeblocks: payloadBlocks },
                     { headers: { Authorization: token } }
                 );
+                await updateSubjectCacheFromBackend(subjectId);
             } catch (err) {
                 console.error("❌ Failed to save resized block:", err);
             }
@@ -222,7 +410,7 @@ function ScheduleItem() {
             // 5) Cleanup
             setResizing(null);
             window.removeEventListener("mousemove", handleMouseMove);
-            window.removeEventListener("mouseup",   handleMouseUp);
+            window.removeEventListener("mouseup", handleMouseUp);
         };
 
         window.addEventListener("mousemove", handleMouseMove);
@@ -319,6 +507,7 @@ function ScheduleItem() {
                     }, {
                         headers: { Authorization: token }
                     });
+                    await updateSubjectCacheFromBackend(subjectId);
 
                     setTimeblocks(newTimeblocks);
                     setSelectedBlockIndex(null);
@@ -336,6 +525,10 @@ function ScheduleItem() {
             setDragHover(null);
             setHoverSubject(null);
             setLoadedSubjectId(null);
+            setOverlappingTeacherSchedules([]);
+            setSwapReplaceHover(null);
+            setDraggedBlockIndex(null);
+            setDraggedTeacherBusy([]);
         };
         window.addEventListener("clearDragPreview", handler);
         return () => window.removeEventListener("clearDragPreview", handler);
@@ -435,6 +628,26 @@ function ScheduleItem() {
         fetchData();
     }, [id]);
 
+    // Fetch all teachers and all subjects once, cache globally
+    useEffect(() => {
+        const token = localStorage.getItem('user_token');
+        if (!token) return;
+        if (!teacherCacheGlobal.current) {
+            axios.get(`${API_BASE}/teacher/all_org_teachers`, {
+                headers: { Authorization: token }
+            }).then(res => {
+                teacherCacheGlobal.current = res.data;
+            });
+        }
+        if (!subjectCacheGlobal.current) {
+            axios.get(`${API_BASE}/subject/all_org_subjects`, {
+                headers: { Authorization: token }
+            }).then(res => {
+                subjectCacheGlobal.current = res.data;
+            });
+        }
+    }, []);
+
     if (loading) {
         return (
             <Center h="100vh">
@@ -499,6 +712,21 @@ function ScheduleItem() {
             allTimesSet.add(clampTime(r.start.time));
             allTimesSet.add(clampTime(r.end.time));
         });
+    }
+
+    // Add overlapping teacher schedule times when Cmd is held
+    if (cmdHeld && overlappingTeacherSchedules.length > 0) {
+        overlappingTeacherSchedules.forEach((block: any) => {
+            allTimesSet.add(clampTime(block.start.time));
+            allTimesSet.add(clampTime(block.end.time));
+        });
+    }
+
+    // Add times from blocks that might be involved in swap/replace operations
+    if (swapReplaceHover && timeblocks[swapReplaceHover.blockIndex]) {
+        const targetBlock = timeblocks[swapReplaceHover.blockIndex];
+        allTimesSet.add(clampTime(targetBlock.start.time));
+        allTimesSet.add(clampTime(targetBlock.end.time));
     }
 // Convert to sorted array
     let tempSet = new Set(allTimesSet);
@@ -626,6 +854,7 @@ function ScheduleItem() {
                 }, {
                     headers: { Authorization: token }
                 });
+                await updateSubjectCacheFromBackend(subjectId);
 
                 setTimeblocks(newTimeblocks);
             } catch (err) {
@@ -665,6 +894,7 @@ function ScheduleItem() {
             }, {
                 headers: { Authorization: token }
             });
+            await updateSubjectCacheFromBackend(subjectId);
 
             // Add the new block to timeblocks state for immediate feedback
             // Find all teacher names with this subject in required_teach
@@ -753,6 +983,7 @@ function ScheduleItem() {
                                             e.preventDefault();
                                             e.stopPropagation();
                                             setShiftHeld(e.shiftKey);
+                                            setCmdHeld(e.metaKey);
                                             const subjectId = getDraggedSubjectId();
                                             if (!subjectId) return;
 
@@ -783,6 +1014,9 @@ function ScheduleItem() {
                                                     setHoverSubject(subject);
                                                     setLoadedSubjectId(subjectId);
                                                     fetchTeacherBusyRanges(subject);
+                                                    if (cmdHeld) {
+                                                        fetchOverlappingTeacherSchedules(subject);
+                                                    }
                                                 }
                                             }
                                         }}
@@ -792,21 +1026,25 @@ function ScheduleItem() {
                                             e.stopPropagation();
                                             e.dataTransfer.dropEffect = "move"; // 👈 this tells the browser it was a successful drop
                                             setDraggedTeacherBusy([]);
+                                            setOverlappingTeacherSchedules([]);
+                                            setDraggedBlockIndex(null);
                                             handleDrop(e, day, t);
                                             setDragHover(null);
                                             setHoverSubject(null);
                                             setLoadedSubjectId(null);
                                             setStableHoverTime(null);
                                             setShiftHeld(false);
+                                            setCmdHeld(false);
                                         }}
                                         onDragEnd={() => {
-                                            setDragHover(null);         // ✅ clears lingering green box
-                                            setHoverSubject(null);      // ✅ clears preview logic
+                                            setDragHover(null);
+                                            setHoverSubject(null);
                                             setLoadedSubjectId(null);
-                                            setShiftHeld(false);
-                                            setStableHoverTime(null);
+                                            setSelectedBlockIndex(null);
+                                            setOverlappingTeacherSchedules([]);
+                                            setSwapReplaceHover(null);
+                                            setDraggedBlockIndex(null);
                                             setDraggedTeacherBusy([]);
-                                            // ✅ resets caching
                                         }}
 
                                     />
@@ -822,6 +1060,7 @@ function ScheduleItem() {
                     const startRow = timeToRowIndex[block.start.time];
                     const endRow = timeToRowIndex[block.end.time];
                     const rowSpan = endRow - startRow;
+                    const isBeingDragged = selectedBlockIndex === i;
 
                     return (
                         <Box
@@ -858,36 +1097,129 @@ function ScheduleItem() {
                                 setDraggedSubjectId(block.subjectId);
                                 setDraggedSubjectData(block);
                                 setHoverSubject(block);
+                                setDraggedBlockIndex(i);
+                                // Show teacher busy preview immediately if dragging a subject as a student
+                                if (item?.type === "Student" && block.teachers?.length) {
+                                    fetchTeacherBusyRanges(block);
+                                }
+                            }}
+                            onDragOver={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setShiftHeld(e.shiftKey);
+                                setCmdHeld(e.metaKey);
+                                
+                                // Clear drag hover when over a block (since we're not over an empty cell)
+                                setDragHover(null);
+                                setStableHoverTime(null);
+                                
+                                // Check if we're dragging over this block and it's not the same block being dragged
+                                if (draggedBlockIndex !== null && !isBeingDragged && draggedBlockIndex !== i) {
+                                    // Determine which half of the block the mouse is over
+                                    const rect = e.currentTarget.getBoundingClientRect();
+                                    const x = e.clientX - rect.left;
+                                    const side = x < rect.width / 2 ? 'swap' : 'replace';
+                                    setSwapReplaceHover({ blockIndex: i, side });
+                                }
+                            }}
+                            onDragEnter={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                
+                                // Clear drag hover when entering a block
+                                setDragHover(null);
+                                setStableHoverTime(null);
+                                
+                                // Check if we're dragging over this block and it's not the same block being dragged
+                                if (draggedBlockIndex !== null && !isBeingDragged && draggedBlockIndex !== i) {
+                                    // Determine which half of the block the mouse is over
+                                    const rect = e.currentTarget.getBoundingClientRect();
+                                    const x = e.clientX - rect.left;
+                                    const side = x < rect.width / 2 ? 'swap' : 'replace';
+                                    setSwapReplaceHover({ blockIndex: i, side });
+                                }
+                            }}
+                            onDragLeave={(e) => {
+                                // Only clear if we're leaving the block entirely
+                                if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                                    setSwapReplaceHover(null);
+                                }
+                            }}
+                            onDrop={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                
+                                if (draggedBlockIndex !== null && !isBeingDragged && draggedBlockIndex !== i && swapReplaceHover) {
+                                    if (swapReplaceHover.side === 'swap') {
+                                        handleSwapBlocks(draggedBlockIndex, i);
+                                    } else {
+                                        handleReplaceBlock(draggedBlockIndex, i);
+                                    }
+                                }
+                                
+                                setSwapReplaceHover(null);
+                                setDraggedBlockIndex(null);
+                                setDragHover(null);
+                                setHoverSubject(null);
+                                setLoadedSubjectId(null);
+                                setStableHoverTime(null);
+                                setShiftHeld(false);
+                                setCmdHeld(false);
+                                setOverlappingTeacherSchedules([]);
                             }}
                             onDragEnd={() => {
                                 setDragHover(null);
                                 setHoverSubject(null);
                                 setLoadedSubjectId(null);
                                 setSelectedBlockIndex(null);
+                                setOverlappingTeacherSchedules([]);
+                                setSwapReplaceHover(null);
+                                setDraggedBlockIndex(null);
+                                setDraggedTeacherBusy([]);
                             }}
                         >
-                            {/* ⬆️ Top Resize Handle */}
-                            {/*<Box*/}
-                            {/*    position="absolute"*/}
-                            {/*    top={0}*/}
-                            {/*    left={0}*/}
-                            {/*    right={0}*/}
-                            {/*    height="6px"*/}
-                            {/*    bg="transparent"*/}
-                            {/*    cursor="ns-resize"*/}
-                            {/*    draggable={false}*/}
-                            {/*    onDragStart={e => e.preventDefault()}*/}
-                            {/*    onMouseDown={(e) => {*/}
-                            {/*        e.stopPropagation();*/}
-                            {/*        e.preventDefault();*/}
-                            {/*        setResizing({*/}
-                            {/*            blockIndex: i,*/}
-                            {/*            direction: "top",*/}
-                            {/*            day:   block.start.day,*/}
-                            {/*            time:  block.start.time,*/}
-                            {/*        });*/}
-                            {/*    }}*/}
-                            {/*/>*/}
+                            {/* SWAP/REPLACE Overlay */}
+                            {swapReplaceHover && swapReplaceHover.blockIndex === i && (
+                                <Box
+                                    position="absolute"
+                                    top={0}
+                                    left={0}
+                                    right={0}
+                                    bottom={0}
+                                    display="flex"
+                                    zIndex={10}
+                                    borderRadius="md"
+                                    overflow="hidden"
+                                >
+                                    <Box
+                                        flex={1}
+                                        bg={swapReplaceHover.side === 'swap' ? 'blue.300' : 'blue.100'}
+                                        display="flex"
+                                        alignItems="center"
+                                        justifyContent="center"
+                                        fontWeight="bold"
+                                        fontSize="sm"
+                                        borderRight="2px solid white"
+                                        color="white"
+                                        textShadow="1px 1px 2px rgba(0,0,0,0.8)"
+                                    >
+                                        SWAP
+                                    </Box>
+                                    <Box
+                                        flex={1}
+                                        bg={swapReplaceHover.side === 'replace' ? 'red.300' : 'red.100'}
+                                        display="flex"
+                                        alignItems="center"
+                                        justifyContent="center"
+                                        fontWeight="bold"
+                                        fontSize="sm"
+                                        color="white"
+                                        textShadow="1px 1px 2px rgba(0,0,0,0.8)"
+                                    >
+                                        REPLACE
+                                    </Box>
+                                </Box>
+                            )}
 
                             <VStack spacing={0} pointerEvents="none">
                                 <Box>{block.name}</Box>
@@ -929,36 +1261,94 @@ function ScheduleItem() {
                         </Box>
                     );
                 })}
-                {/*{resizing && (() => {*/}
-                {/*    // extract the raw cell time you grabbed in handleMouseMove*/}
-                {/*      const { blockIndex, direction, day, time: rawTime } = resizing;*/}
-                {/*      const block = timeblocks[blockIndex];*/}
 
-                {/*          // decide new start/end *from* rawTime (never from dragHover)*/}
-                {/*              const startTime = direction === "top"*/}
-                {/*        ? rawTime        // resizing the top edge*/}
-                {/*           : block.start.time;*/}
-                {/*      const endTime   = direction === "bottom"*/}
-                {/*        ? rawTime        // resizing the bottom edge*/}
-                {/*           : block.end.time;*/}
-
-                {/*    // lookup grid rows & columns*/}
-                {/*    const startRow = timeToRowIndex[startTime];*/}
-                {/*    const endRow   = timeToRowIndex[endTime];*/}
-                {/*    const colIndex = dayToCol[day];*/}
-
-                {/*    return (*/}
-                {/*        <Box*/}
-                {/*            gridColumnStart={colIndex}*/}
-                {/*            gridColumnEnd={colIndex + 1}*/}
-                {/*            gridRowStart={startRow}*/}
-                {/*            gridRowEnd={endRow}*/}
-                {/*            border="2px dashed green"*/}
-                {/*            zIndex={10}*/}
-                {/*            pointerEvents="none"*/}
-                {/*        />*/}
-                {/*    );*/}
-                {/*})()}*/}
+                {/* Overlapping Teacher Schedule Blocks (when Cmd is held) */}
+                {cmdHeld && (() => {
+                    // Group blocks by day and time range
+                    const cellMap: { [key: string]: any[] } = {};
+                    overlappingTeacherSchedules.forEach((block: any) => {
+                        const key = `${block.start.day}|${block.start.time}|${block.end.time}`;
+                        if (!cellMap[key]) cellMap[key] = [];
+                        cellMap[key].push(block);
+                    });
+                    return Object.entries(cellMap).map(([key, blocks], i) => {
+                        const [day, start, end] = key.split('|');
+                        const col = dayToCol[day];
+                        const startRow = timeToRowIndex[start];
+                        const endRow = timeToRowIndex[end];
+                        const rowSpan = endRow - startRow;
+                        if (blocks.length === 1) {
+                            const block = blocks[0];
+                            return (
+                                <Box
+                                    key={`overlapping-${i}`}
+                                    gridColumn={col}
+                                    gridRow={`${startRow} / span ${rowSpan}`}
+                                    bg={block.color || "purple.400"}
+                                    color="black"
+                                    display="flex"
+                                    alignItems="center"
+                                    justifyContent="center"
+                                    textAlign="center"
+                                    px={2}
+                                    fontWeight="bold"
+                                    border="1px dashed purple"
+                                    zIndex={2}
+                                    opacity={0.8}
+                                    pointerEvents="none"
+                                >
+                                    <VStack spacing={0} pointerEvents="none">
+                                        <Box fontSize="xs">{block.name}</Box>
+                                        <Box fontSize="xs" fontWeight="normal">
+                                            {block.displayclass || '-'}
+                                        </Box>
+                                    </VStack>
+                                </Box>
+                            );
+                        } else {
+                            // Show overlapping blocks side by side
+                            return (
+                                <Box
+                                    key={`overlapping-multi-${i}`}
+                                    gridColumn={col}
+                                    gridRow={`${startRow} / span ${rowSpan}`}
+                                    display="flex"
+                                    flexDirection="row"
+                                    justifyContent="center"
+                                    alignItems="stretch"
+                                    border="2px dashed purple"
+                                    zIndex={2}
+                                    pointerEvents="none"
+                                    bg="purple.100"
+                                    px={1}
+                                >
+                                    {blocks.map((block: any, j: number) => (
+                                        <Box
+                                            key={j}
+                                            bg={block.color || "purple.200"}
+                                            color="black"
+                                            borderRight={j < blocks.length - 1 ? "1px solid purple" : undefined}
+                                            py={1}
+                                            px={2}
+                                            display="flex"
+                                            flexDirection="column"
+                                            alignItems="center"
+                                            fontWeight="bold"
+                                            fontSize="xs"
+                                            opacity={0.9}
+                                            minWidth={0}
+                                            flex={1}
+                                            overflow="hidden"
+                                        >
+                                            <Box whiteSpace="nowrap" textOverflow="ellipsis" overflow="hidden">{block.name}</Box>
+                                            <Box fontWeight="normal" whiteSpace="nowrap" textOverflow="ellipsis" overflow="hidden">{block.displayclass || '-'}</Box>
+                                        </Box>
+                                    ))}
+                                </Box>
+                            );
+                        }
+                    });
+                })()}
                 {dragHover && hoverSubject && (() => {
                     const day = dragHover.day;
                     const startTime = stableHoverTime || dragHover.time;
@@ -1104,6 +1494,7 @@ function ScheduleItem() {
                                             }, {
                                                 headers: { Authorization: token }
                                             });
+                                            await updateSubjectCacheFromBackend(block.subjectId);
                                         } catch (err) {
                                             console.error("Failed to update block:", err);
                                         }

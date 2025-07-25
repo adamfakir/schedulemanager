@@ -8,6 +8,7 @@ import {Box, Flex, Button, Spacer, Heading, HStack, VStack, Center, Icon, Divide
 import { useNavigate, useLocation } from 'react-router-dom';
 import { ArrowDownIcon, HamburgerIcon} from '@chakra-ui/icons'
 import { AvailabilityContext } from '../utils/AvailabilityContext';
+import { teacherCacheGlobal, subjectCacheGlobal } from '../utils/globalCache';
 
 import axios from 'axios';
 import {
@@ -89,7 +90,7 @@ import {
         try {
 
             await axios.put(
-                `https://schedulemanagerbackend.onrender.com/teacher/${item._id.$oid || item._id}/update`,
+                `https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/${item._id.$oid || item._id}/update`,
                 { availability: newAvailability },
                 { headers: { Authorization: token } }
             );
@@ -105,31 +106,34 @@ import {
         setScheduleId(id);
         const fetchTypeAndSubjects = async () => {
             try {
-                const res = await axios.get(`https://schedulemanagerbackend.onrender.com/student/${id}`, {
+                const res = await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/student/${id}`, {
                     headers: { Authorization: token },
                 });
                 setScheduleType("Student");
                 setItem(res.data);  // <--- Add this
-                const allStudentsRes = await axios.get(`https://schedulemanagerbackend.onrender.com/student/all_org_students`, {
+                const allStudentsRes = await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/student/all_org_students`, {
                     headers: { Authorization: token },
                 });
-                const allStudents = allStudentsRes.data;
-
-// Store them in state
+                const allStudents = allStudentsRes.data || [];
                 setAllStudents(allStudents);
-                // Fetch subjects
-                const subjRes = await axios.get(`https://schedulemanagerbackend.onrender.com/subject/all_org_subjects`, {
-                    headers: { Authorization: token },
-                });
-                setSubjects(subjRes.data || []);
-                // Fetch teacher info
-                const teacherRes = await axios.get(`https://schedulemanagerbackend.onrender.com/teacher/all_org_teachers`, {
-                    headers: { Authorization: token },
-                });
-                const allTeachers = teacherRes.data;
-
-// Attach teacher names
-                const enrichedSubjects = subjRes.data.map((subject: any) => {
+                // Fetch subjects (use cache if available)
+                if (!subjectCacheGlobal.current) {
+                    const subjRes = await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/subject/all_org_subjects`, {
+                        headers: { Authorization: token },
+                    });
+                    subjectCacheGlobal.current = subjRes.data || [];
+                }
+                setSubjects(subjectCacheGlobal.current || []);
+                // Fetch teachers (use cache if available)
+                if (!teacherCacheGlobal.current) {
+                    const teacherRes = await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/all_org_teachers`, {
+                        headers: { Authorization: token },
+                    });
+                    teacherCacheGlobal.current = teacherRes.data || [];
+                }
+                const allTeachers = teacherCacheGlobal.current || [];
+                // Attach teacher names
+                const enrichedSubjects = (subjectCacheGlobal.current || []).map((subject: any) => {
                     const requiredTeacherNames = allTeachers
                         .filter((t: any) =>
                             (t.required_teach || []).some((sid: any) =>
@@ -142,36 +146,33 @@ import {
                         }));
                     return { ...subject, teachers: requiredTeacherNames };
                 });
-
                 setSubjects(enrichedSubjects);
             } catch {
                 try {
-                                       // 1) fetch the teacher object
-                                           const teacherRes = await axios.get(
-                                             `https://schedulemanagerbackend.onrender.com/teacher/${id}`,
-                                             { headers: { Authorization: token } }
-                                          );
+                    const teacherRes = await axios.get(
+                        `https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/${id}`,
+                        { headers: { Authorization: token } }
+                    );
                     const teacherData = { ...teacherRes.data, type: "Teacher" };
                     setItem(teacherData);
-                                       setScheduleType("Teacher");
-                                       // setItem(teacherRes.data);
+                    setScheduleType("Teacher");
                     setAvailability(teacherData.availability || []);
-                                           // 2) load ALL students (so you can filter who takes the teacher’s classes)
-                                              const allStudentsRes = await axios.get(
-                                             `https://schedulemanagerbackend.onrender.com/student/all_org_students`,
-                                             { headers: { Authorization: token } }
-                                           );
-                                       setAllStudents(allStudentsRes.data);
-
-                                           // 3) load ALL subjects (so you can list the ones this teacher teaches)
-                                               const subjRes = await axios.get(
-                                             `https://schedulemanagerbackend.onrender.com/subject/all_org_subjects`,
-                                             { headers: { Authorization: token } }
-                                          );
-                                       setSubjects(subjRes.data);
+                    const allStudentsRes = await axios.get(
+                        `https://schedulebackendapi-3an8u.ondigitalocean.app/student/all_org_students`,
+                        { headers: { Authorization: token } }
+                    );
+                    setAllStudents(allStudentsRes.data || []);
+                    if (!subjectCacheGlobal.current) {
+                        const subjRes = await axios.get(
+                            `https://schedulebackendapi-3an8u.ondigitalocean.app/subject/all_org_subjects`,
+                            { headers: { Authorization: token } }
+                        );
+                        subjectCacheGlobal.current = subjRes.data;
+                    }
+                    setSubjects(subjectCacheGlobal.current || []);
                 } catch {
                     try {
-                        await axios.get(`https://schedulemanagerbackend.onrender.com/subject/${id}`, {
+                        await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/subject/${id}`, {
                             headers: { Authorization: token },
                         });
                         setScheduleType("Subject");

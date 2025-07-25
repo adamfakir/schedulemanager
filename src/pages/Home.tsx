@@ -3,8 +3,8 @@ import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import {Box, Heading, Text, Spinner, VStack, Center} from '@chakra-ui/react';
 
-const API_BASE = "https://schedulemanagerbackend.onrender.com";
-
+const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app/";
+// https://schedulemanagerbackend.onrender.com
 interface User {
     full_name: string;
     email: string;
