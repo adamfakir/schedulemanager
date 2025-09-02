@@ -1,12 +1,12 @@
 {
   "files": {
-    "main.js": "/schedulemanager/static/js/main.e8cffdbb.js",
+    "main.js": "/schedulemanager/static/js/main.d7d6d921.js",
     "static/js/453.1b7670cf.chunk.js": "/schedulemanager/static/js/453.1b7670cf.chunk.js",
     "index.html": "/schedulemanager/index.html",
-    "main.e8cffdbb.js.map": "/schedulemanager/static/js/main.e8cffdbb.js.map",
+    "main.d7d6d921.js.map": "/schedulemanager/static/js/main.d7d6d921.js.map",
     "453.1b7670cf.chunk.js.map": "/schedulemanager/static/js/453.1b7670cf.chunk.js.map"
   },
   "entrypoints": [
-    "static/js/main.e8cffdbb.js"
+    "static/js/main.d7d6d921.js"
   ]
 }
