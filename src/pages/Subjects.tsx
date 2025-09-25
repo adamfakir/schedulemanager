@@ -30,8 +30,9 @@ import {
 } from '@chakra-ui/react';
 import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, EditIcon, CopyIcon} from "@chakra-ui/icons";
 import {FaThumbtack} from "react-icons/fa";
-import { useNavigate } from 'react-router-dom';
-const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app/";
+import { useNavigate, Link } from 'react-router-dom';
+import { usePageTitle } from '../utils/usePageTitle';
+const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app";
 
 interface User {
     full_name: string;
@@ -125,6 +126,9 @@ function DurationInput({
 }
 
 function Subjects() {
+    // Set page title
+    usePageTitle('Subjects - Schedule Manager');
+    
     const [user, setUser] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
     const [subjects, setSubjects] = useState<any[]>([]);
@@ -454,13 +458,16 @@ function Subjects() {
                                     {pinned.map((subject) => (
                                         <Box
                                             key={`pinned-${subject._id?.$oid}`}
+                                            as={Link}
+                                            to={`/schedule/${subject._id?.$oid}`}
                                             p={3}
                                             bg="#daf7e6"
                                             borderRadius="md"
                                             borderLeft={`7px solid ${subject.color}`}
-                                            onClick={() => navigate(`/schedule/${subject._id?.$oid}`)}
                                             cursor="pointer"
                                             _hover={{ bg: "#def" }}
+                                            textDecoration="none"
+                                            display="block"
                                         >
                                             <HStack justify="space-between">
                                                 <Box fontWeight="bold">{subject.name}</Box>
@@ -479,6 +486,7 @@ function Subjects() {
                                                                 setIsEditMode(true);
                                                                 setCurrentSubject(subject);
                                                                 onOpen();
+                                                                e.preventDefault();
                                                                 e.stopPropagation();
                                                             }}
                                                         />
@@ -490,7 +498,7 @@ function Subjects() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="orange"
-                                                            onClick={(e) => {e.stopPropagation(); togglePin(subject._id.$oid)}}
+                                                            onClick={(e) => {e.preventDefault(); e.stopPropagation(); togglePin(subject._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Delete">
@@ -500,7 +508,7 @@ function Subjects() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="red"
-                                                            onClick={(e) =>{e.stopPropagation(); handleDelete(subject._id.$oid)}}
+                                                            onClick={(e) =>{e.preventDefault(); e.stopPropagation(); handleDelete(subject._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Duplicate">
@@ -511,6 +519,7 @@ function Subjects() {
                                                             size="sm"
                                                             colorScheme="purple"
                                                             onClick={(e) => {
+                                                                e.preventDefault();
                                                                 e.stopPropagation(); 
                                                                 console.log("Original subject for duplication:", subject);
                                                                 setIsEditMode(false);
@@ -537,13 +546,16 @@ function Subjects() {
                                     {unpinned.map((subject) => (
                                         <Box
                                             key={`unpinned-${subject._id?.$oid}`}
+                                            as={Link}
+                                            to={`/schedule/${subject._id?.$oid}`}
                                             p={3}
                                             bg="#e1f5e9"
                                             borderRadius="md"
                                             borderLeft={`7px solid ${subject.color}`}
-                                            onClick={() => navigate(`/schedule/${subject._id?.$oid}`)}
                                             cursor="pointer"
                                             _hover={{ bg: "#def" }}
+                                            textDecoration="none"
+                                            display="block"
                                         >
                                             <HStack justify="space-between">
                                                 <Box fontWeight="bold">{subject.name}</Box>
@@ -562,6 +574,7 @@ function Subjects() {
                                                                 setIsEditMode(true);
                                                                 setCurrentSubject(subject);
                                                                 onOpen();
+                                                                e.preventDefault();
                                                                 e.stopPropagation();
                                                             }}
                                                         />
@@ -573,7 +586,7 @@ function Subjects() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="gray"
-                                                            onClick={(e) => {e.stopPropagation(); togglePin(subject._id.$oid)}}
+                                                            onClick={(e) => {e.preventDefault(); e.stopPropagation(); togglePin(subject._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Delete">
@@ -583,7 +596,7 @@ function Subjects() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="red"
-                                                            onClick={(e) => {e.stopPropagation(); handleDelete(subject._id.$oid)}}
+                                                            onClick={(e) => {e.preventDefault(); e.stopPropagation(); handleDelete(subject._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Duplicate">
@@ -594,6 +607,7 @@ function Subjects() {
                                                             size="sm"
                                                             colorScheme="purple"
                                                             onClick={(e) => {
+                                                                e.preventDefault();
                                                                 e.stopPropagation(); 
                                                                 console.log("Original subject for duplication:", subject);
                                                                 setIsEditMode(false);

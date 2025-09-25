@@ -2,8 +2,9 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import {Box, Heading, Text, Spinner, VStack, Center} from '@chakra-ui/react';
+import { usePageTitle } from '../utils/usePageTitle';
 
-const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app/";
+const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app";
 // https://schedulemanagerbackend.onrender.com
 interface User {
     full_name: string;
@@ -12,6 +13,9 @@ interface User {
 }
 
 function Home() {
+    // Set page title
+    usePageTitle('Home - Schedule Manager');
+    
     const [user, setUser] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
 

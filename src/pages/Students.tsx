@@ -30,8 +30,9 @@ import {
 } from '@chakra-ui/react';
 import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, EditIcon, CopyIcon} from "@chakra-ui/icons";
 import {FaThumbtack} from "react-icons/fa";
-import { useNavigate } from 'react-router-dom';
-const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app/";
+import { useNavigate, Link } from 'react-router-dom';
+import { usePageTitle } from '../utils/usePageTitle';
+const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app";
 
 interface User {
     full_name: string;
@@ -40,6 +41,9 @@ interface User {
 }
 
 function Students() {
+    // Set page title
+    usePageTitle('Students - Schedule Manager');
+    
     const [user, setUser] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
     const [students, setStudents] = useState<any[]>([]);
@@ -311,12 +315,15 @@ function Students() {
                                     {pinned.map((student) => (
                                         <Box
                                             key={`pinned-${student._id?.$oid}`}
+                                            as={Link}
+                                            to={`/schedule/${student._id?.$oid}`}
                                             p={3}
                                             bg="#daf7e6"
                                             borderRadius="md"
-                                            onClick={() => navigate(`/schedule/${student._id?.$oid}`)}
                                             cursor="pointer"
                                             _hover={{ bg: "#def" }}
+                                            textDecoration="none"
+                                            display="block"
                                             // borderLeft={`7px solid ${student.color}`}
                                         >
                                             <HStack justify="space-between">
@@ -339,6 +346,7 @@ function Students() {
                                                                     required_classes: student.required_classes?.map((s: any) => s.$oid) || [],
                                                                 });
                                                                 onOpen();
+                                                                e.preventDefault();
                                                                 e.stopPropagation();
                                                             }}
                                                         />
@@ -350,7 +358,7 @@ function Students() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="orange"
-                                                            onClick={(e) => {e.stopPropagation(); togglePin(student._id.$oid)}}
+                                                            onClick={(e) => {e.preventDefault(); e.stopPropagation(); togglePin(student._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Delete">
@@ -360,7 +368,7 @@ function Students() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="red"
-                                                            onClick={(e) => {e.stopPropagation(); handleDelete(student._id.$oid)}}
+                                                            onClick={(e) => {e.preventDefault(); e.stopPropagation(); handleDelete(student._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Duplicate">
@@ -371,6 +379,7 @@ function Students() {
                                                             size="sm"
                                                             colorScheme="purple"
                                                             onClick={(e) => {
+                                                                e.preventDefault();
                                                                 e.stopPropagation();
                                                                 setIsEditMode(false);
                                                                 setCurrentStudent({
@@ -393,12 +402,15 @@ function Students() {
                                     {unpinned.map((student) => (
                                         <Box
                                             key={`unpinned-${student._id?.$oid}`}
+                                            as={Link}
+                                            to={`/schedule/${student._id?.$oid}`}
                                             p={3}
                                             bg="#e1f5e9"
                                             borderRadius="md"
-                                            onClick={() => navigate(`/schedule/${student._id?.$oid}`)}
                                             cursor="pointer"
                                             _hover={{ bg: "#def" }}
+                                            textDecoration="none"
+                                            display="block"
                                             // borderLeft={`7px solid ${student.color}`}
                                         >
                                             <HStack justify="space-between">
@@ -415,6 +427,7 @@ function Students() {
                                                             variant="ghost"
                                                             size="sm"
                                                             onClick={(e) => {
+                                                                e.preventDefault();
                                                                 e.stopPropagation();
                                                                 setIsEditMode(true);
                                                                 setCurrentStudent({
@@ -432,7 +445,7 @@ function Students() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="gray"
-                                                            onClick={(e) => {e.stopPropagation(); togglePin(student._id.$oid)}}
+                                                            onClick={(e) => {e.preventDefault(); e.stopPropagation(); togglePin(student._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Delete">
@@ -442,7 +455,7 @@ function Students() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="red"
-                                                            onClick={(e) => {e.stopPropagation(); handleDelete(student._id.$oid)}}
+                                                            onClick={(e) => {e.preventDefault(); e.stopPropagation(); handleDelete(student._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Duplicate">
@@ -453,6 +466,7 @@ function Students() {
                                                             size="sm"
                                                             colorScheme="purple"
                                                             onClick={(e) => {
+                                                                e.preventDefault();
                                                                 e.stopPropagation();
                                                                 setIsEditMode(false);
                                                                 setCurrentStudent({

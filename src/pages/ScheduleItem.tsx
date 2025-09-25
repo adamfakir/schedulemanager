@@ -1,13 +1,16 @@
 import React, { useEffect, useState, useContext } from 'react';
 import { useParams } from 'react-router-dom';
-import { Box, Heading, Spinner, Center, VStack } from '@chakra-ui/react';
+import { Box, Heading, Spinner, Center, VStack, Button, HStack, Checkbox } from '@chakra-ui/react';
+import { DownloadIcon } from '@chakra-ui/icons';
 import axios from 'axios';
 import {getDraggedSubjectData, getDraggedSubjectId, setDraggedSubjectId, setDraggedSubjectData} from '../utils/dragSubjectStore';
 import { useRef } from 'react';
 import { AvailabilityContext } from '../utils/AvailabilityContext';
 import { teacherCacheGlobal, subjectCacheGlobal } from '../utils/globalCache';
+import { usePageTitle } from '../utils/usePageTitle';
+import { exportScheduleToExcel } from '../utils/excelExport';
 
-const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app/";
+const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app";
 
 let currentDraggedSubjectId: string | null = null;
 const timeToMinutes = (time: string) => {
@@ -24,23 +27,73 @@ const minutesToTime = (min: number) => {
     return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
 };
 
-// Helper to update the subject cache after a subject's timeblocks change
+// Helper functions for localStorage cache (TTL 1 hour)
+const CACHE_TTL = 60 * 60 * 1000;
+const getCache = (key: string) => {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    try {
+        const { data, ts } = JSON.parse(raw);
+        if (Date.now() - ts < CACHE_TTL) return data;
+    } catch {}
+    return null;
+};
+const setCache = (key: string, data: any) => {
+    localStorage.setItem(key, JSON.stringify({ data, ts: Date.now() }));
+};
+// Helper to update subject cache after a subject's timeblocks change
 async function updateSubjectCacheFromBackend(subjectId: string) {
     const token = localStorage.getItem('user_token');
-    if (!subjectCacheGlobal.current) return;
+    let subjectCache = subjectCacheGlobal.current || getCache('subjectCacheGlobal') || [];
     try {
+        // Update the single subject in the cache
         const res = await axios.get(`${API_BASE}/subject/${subjectId}`, {
             headers: { Authorization: token }
         });
         const updated = res.data;
-        const idx = subjectCacheGlobal.current.findIndex((s: any) => (s._id?.$oid || s._id) === subjectId);
+        const idx = subjectCache.findIndex((s: any) => (s._id?.$oid || s._id) === subjectId);
         if (idx !== -1) {
-            subjectCacheGlobal.current[idx] = updated;
+            subjectCache[idx] = updated;
+        } else {
+            subjectCache.push(updated);
         }
+        subjectCacheGlobal.current = subjectCache;
+        setCache('subjectCacheGlobal', subjectCache);
+        // Now force refresh the entire subject cache from backend
+        const allRes = await axios.get(`${API_BASE}/subject/all_org_subjects`, {
+            headers: { Authorization: token }
+        });
+        const allSubjects = allRes.data || [];
+        subjectCacheGlobal.current = allSubjects;
+        setCache('subjectCacheGlobal', allSubjects);
     } catch (err) {
         // fallback: do nothing
     }
 }
+async function updateTeacherCacheFromBackend(teacherId: string) {
+    const token = localStorage.getItem('user_token');
+    let teacherCache = teacherCacheGlobal.current || getCache('teacherCacheGlobal') || [];
+    try {
+        const res = await axios.get(`${API_BASE}/teacher/${teacherId}`, {
+            headers: { Authorization: token }
+        });
+        const updated = res.data;
+        const idx = teacherCache.findIndex((t: any) => (t._id?.$oid || t._id) === teacherId);
+        if (idx !== -1) {
+            teacherCache[idx] = updated;
+        } else {
+            teacherCache.push(updated);
+        }
+        teacherCacheGlobal.current = teacherCache;
+        setCache('teacherCacheGlobal', teacherCache);
+    } catch (err) {
+        // fallback: do nothing
+    }
+}
+
+// Helper to crop [SEM1] and [SEM2] from subject names for schedule display
+const cropSemesterTag = (name: string) =>
+    name.replace(/\[SEM1\]|\[SEM2\]/gi, '').trim();
 
 function ScheduleItem() {
     const { id } = useParams();
@@ -64,6 +117,8 @@ function ScheduleItem() {
     } | null>(null);
     const [draggedBlockIndex, setDraggedBlockIndex] = useState<number | null>(null);
     const teacherCacheRef = useRef<any[] | null>(null);
+    const [showEndTime, setShowEndTime] = useState<boolean>(false);
+    const [hideTeacherNames, setHideTeacherNames] = useState<boolean>(false);
     const computeBusyRanges = (availability: TimeBlock[]): TimeBlock[] => {
         const busyRanges: TimeBlock[] = [];
         const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
@@ -156,6 +211,7 @@ function ScheduleItem() {
             subjectTeacherNames.includes(t.displayname) ||
             subjectTeacherNames.includes(t.name)
         );
+        const seenBlocks = new Set();
         const overlappingBlocks: any[] = [];
         for (const teacher of matched) {
             // Get teacher's schedule by filtering cached subjects
@@ -166,17 +222,22 @@ function ScheduleItem() {
             for (const subjId of uniqueSubjectIds) {
                 const subj = allSubjects.find((s: any) => (s._id?.$oid || s._id) === subjId);
                 if (!subj) continue;
-                subj.timeblocks?.forEach((tb: any) =>
-                    overlappingBlocks.push({
-                        subjectId: subj._id.$oid || subj._id,
-                        ...tb,
-                        color: subj.color,
-                        name: subj.displayname || subj.name,
-                        displayclass: subj.displayclass, // ensure displayclass is included
-                        teacherName: teacher.displayname || teacher.name,
-                        opacity: 0.5
-                    })
-                );
+                (subj.timeblocks || []).forEach((tb: any) => {
+                    // Use a unique key for each block: subjectId|day|start|end
+                    const key = `${subj._id.$oid || subj._id}|${tb.start.day}|${tb.start.time}|${tb.end.day}|${tb.end.time}`;
+                    if (!seenBlocks.has(key)) {
+                        seenBlocks.add(key);
+                        overlappingBlocks.push({
+                            subjectId: subj._id.$oid || subj._id,
+                            ...tb,
+                            color: subj.color,
+                            name: subj.displayname || subj.name,
+                            displayclass: subj.displayclass, // ensure displayclass is included
+                            teacherName: teacher.displayname || teacher.name,
+                            opacity: 0.5
+                        });
+                    }
+                });
             }
         }
         setOverlappingTeacherSchedules(overlappingBlocks);
@@ -227,6 +288,10 @@ function ScheduleItem() {
                         endtime: tb.end.time,
                     }))
             }, { headers: { Authorization: token } });
+
+            // Refresh cache for both subjects
+            await updateSubjectCacheFromBackend(draggedBlock.subjectId);
+            await updateSubjectCacheFromBackend(targetBlock.subjectId);
         } catch (err) {
             console.error("❌ Failed to swap blocks:", err);
         }
@@ -539,78 +604,86 @@ function ScheduleItem() {
 
         const fetchData = async () => {
             try {
+                // Try student first
                 let res = await axios.get(`${API_BASE}/student/${id}`, { headers: { Authorization: token } });
                 const student = res.data;
                 setItem({ type: "Student", ...student });
 
+                // Fetch all teachers (for teacher names)
                 const teacherRes = await axios.get(`${API_BASE}/teacher/all_org_teachers`, {
                     headers: { Authorization: token }
                 });
                 const allTeachers = teacherRes.data;
 
-                const blocks: any[] = [];
-                for (const subjId of student.required_classes || []) {
-                    const subjectRes = await axios.get(`${API_BASE}/subject/${subjId.$oid || subjId}`, {
+                // Batch fetch all required subjects
+                const subjectIds = (student.required_classes || []).map((rc: any) => rc.$oid || rc);
+                let blocks: any[] = [];
+                if (subjectIds.length > 0) {
+                    const batchRes = await axios.post(`${API_BASE}/subject/batch`, { ids: subjectIds }, {
                         headers: { Authorization: token }
                     });
-                    const subj = subjectRes.data;
-
-                    // Find all teacher names with this subject in required_teach
-                    const teacherNames: string[] = allTeachers
-                        .filter((t: any) =>
-                            (t.required_teach || []).some((sid: any) =>
-                                (sid.$oid || sid) === (subj._id?.$oid || subj._id)
+                    const subjects = batchRes.data;
+                    for (const subj of subjects) {
+                        // Find all teacher names with this subject in required_teach
+                        const teacherNames: string[] = allTeachers
+                            .filter((t: any) =>
+                                (t.required_teach || []).some((sid: any) =>
+                                    (sid.$oid || sid) === (subj._id?.$oid || subj._id)
+                                )
                             )
-                        )
-                        .map((t: any) => t.displayname || t.name);
-
-                    subj.timeblocks?.forEach((tb: any) =>
-                        blocks.push({
-                            subjectId: subj._id.$oid || subj._id,    // ← carry the real Subject ID
-                            ...tb,
-                            color: subj.color,
-                            name: subj.displayname,
-                            teachers: teacherNames
-                        })
-                    );
-                }
-                setTimeblocks(blocks);
-            } catch {
-                try {
-                    let res = await axios.get(`${API_BASE}/teacher/${id}`, { headers: { Authorization: token } });
-                    const teacher = res.data;
-                    setItem({ type: "Teacher", ...teacher });
-
-                    const subjectIdSet = new Set(
-                        [...(teacher.required_teach || []), ...(teacher.can_teach || [])].map(sid => sid.$oid || sid)
-                    );
-
-                    const uniqueSubjectIds = Array.from(subjectIdSet);
-
-                    const blocks: any[] = [];
-                    for (const subjId of uniqueSubjectIds) {
-                        const subjectRes = await axios.get(`${API_BASE}/subject/${subjId}`, { headers: { Authorization: token } });
-                        const subj = subjectRes.data;
-
-                        subj.timeblocks?.forEach((tb: any) =>
+                            .map((t: any) => t.displayname || t.name);
+                        (subj.timeblocks || []).forEach((tb: any) =>
                             blocks.push({
                                 subjectId: subj._id.$oid || subj._id,
                                 ...tb,
                                 color: subj.color,
                                 name: subj.displayname,
-                                displayclass: subj.displayclass,
+                                teachers: teacherNames
                             })
                         );
+                    }
+                }
+                setTimeblocks(blocks);
+            } catch {
+                try {
+                    // Try teacher next
+                    let res = await axios.get(`${API_BASE}/teacher/${id}`, { headers: { Authorization: token } });
+                    const teacher = res.data;
+                    setItem({ type: "Teacher", ...teacher });
+
+                    // Batch fetch all subjects this teacher can/should teach
+                    const subjectIdSet = new Set(
+                        [...(teacher.required_teach || []), ...(teacher.can_teach || [])].map((sid: any) => sid.$oid || sid)
+                    );
+                    const uniqueSubjectIds = Array.from(subjectIdSet);
+                    let blocks: any[] = [];
+                    if (uniqueSubjectIds.length > 0) {
+                        const batchRes = await axios.post(`${API_BASE}/subject/batch`, { ids: uniqueSubjectIds }, {
+                            headers: { Authorization: token }
+                        });
+                        const subjects = batchRes.data;
+                        for (const subj of subjects) {
+                            (subj.timeblocks || []).forEach((tb: any) =>
+                                blocks.push({
+                                    subjectId: subj._id.$oid || subj._id,
+                                    ...tb,
+                                    color: subj.color,
+                                    name: subj.displayname,
+                                    displayclass: subj.displayclass,
+                                })
+                            );
+                        }
                     }
                     setTimeblocks(blocks);
                 } catch {
                     try {
+                        // Fallback: subject view
                         let res = await axios.get(`${API_BASE}/subject/${id}`, { headers: { Authorization: token } });
                         const subject = res.data;
                         setItem({ type: "Subject", ...subject });
                         setTimeblocks(subject.timeblocks || []);
                         const blocks = (subject.timeblocks || []).map((tb: any) => ({
-                            subjectId: subject._id.$oid || subject._id,  // ← subject’s own ID
+                            subjectId: subject._id.$oid || subject._id,
                             ...tb,
                             color: subject.color,
                             name: subject.displayname || subject.name
@@ -627,6 +700,45 @@ function ScheduleItem() {
 
         fetchData();
     }, [id]);
+
+    // Set dynamic page title based on item type and name
+    usePageTitle(item ? `${item.type}: ${item.displayname || item.name}` : 'Schedule Manager');
+
+    // Handle Excel export
+    const handleExportToExcel = async () => {
+        console.log('🟢 Export button clicked');
+        console.log('📊 Item data:', item);
+        console.log('📅 Timeblocks:', timeblocks);
+        console.log('⏰ Sorted times:', sortedTimes);
+
+        if (!item) {
+            alert('No item data available for export');
+            return;
+        }
+
+        if (timeblocks.length === 0) {
+            alert('No schedule blocks to export. Please add some subjects to the schedule first.');
+            return;
+        }
+
+        if (!sortedTimes || sortedTimes.length === 0) {
+            alert('No time data available for export. Please ensure the schedule has valid time slots.');
+            return;
+        }
+
+        try {
+            console.log('🚀 Starting full schedule export with formatting...');
+            await exportScheduleToExcel(timeblocks, item, sortedTimes, hideTeacherNames, showEndTime);
+            console.log('✅ Excel export completed successfully');
+        } catch (error) {
+            console.error('❌ Failed to export schedule:', error);
+            console.error('Error details:', {
+                message: error instanceof Error ? error.message : 'Unknown error',
+                stack: error instanceof Error ? error.stack : 'No stack trace'
+            });
+            alert(`Failed to export schedule: ${error instanceof Error ? error.message : 'Unknown error'}\n\nCheck the browser console for detailed error information.`);
+        }
+    };
 
     // Fetch all teachers and all subjects once, cache globally
     useEffect(() => {
@@ -666,7 +778,7 @@ function ScheduleItem() {
     }
 
     const defaultMin = "08:00";
-    const defaultMax = "16:00";
+    const defaultMax = "15:00";
     const allTimesSet = new Set<string>([defaultMin, defaultMax]);
 
 // Add timeblock times
@@ -799,7 +911,13 @@ function ScheduleItem() {
     const timeToRowIndex: { [key: string]: number } = {};
     sortedTimes.forEach((t, i) => { timeToRowIndex[t] = i + 2; }); // start from row 2 (1 = headers)
 
-    const dayToCol: { [key: string]: number } = {
+    const dayToCol: { [key: string]: number } = showEndTime ? {
+        Monday: 3,
+        Tuesday: 4,
+        Wednesday: 5,
+        Thursday: 6,
+        Friday: 7,
+    } : {
         Monday: 2,
         Tuesday: 3,
         Wednesday: 4,
@@ -935,29 +1053,69 @@ function ScheduleItem() {
             p={4}
             onClick={() => setSelectedBlockIndex(null)}
         >
-            <Heading size="lg" mb={4}>{item.type}: {item.name}</Heading>
+            <HStack justify="space-between" align="center" mb={4}>
+                <Heading size="lg">{item.type}: {item.displayname || item.name}</Heading>
+                <HStack spacing={4}>
+                    <Checkbox
+                        isChecked={showEndTime}
+                        onChange={(e) => setShowEndTime(e.target.checked)}
+                        colorScheme="blue"
+                    >
+                        Show End Time
+                    </Checkbox>
+                    {item?.type === "Student" && (
+                        <Checkbox
+                            isChecked={hideTeacherNames}
+                            onChange={(e) => setHideTeacherNames(e.target.checked)}
+                            colorScheme="blue"
+                        >
+                            Hide Teacher Names in Export
+                        </Checkbox>
+                    )}
+                    <Button
+                        leftIcon={<DownloadIcon />}
+                        colorScheme="green"
+                        variant="outline"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            handleExportToExcel();
+                        }}
+                    >
+                        Export to Excel
+                    </Button>
+                </HStack>
+            </HStack>
 
             <Box
                 display="grid"
-                gridTemplateColumns="80px repeat(5, 1fr)"
+                gridTemplateColumns={showEndTime ? "80px 80px repeat(5, 1fr)" : "80px repeat(5, 1fr)"}
                 gridTemplateRows={gridTemplateRows}
                 border="2px solid black"
                 borderRadius="md"
             >
                 {/* Header Row */}
-                <Box bg="blue.400" border="1px solid black" display="flex" alignItems="center" justifyContent="center" fontWeight="bold">Time</Box>
+                <Box bg="blue.400" border="1px solid black" display="flex" alignItems="center" justifyContent="center" fontWeight="bold" fontSize="sm">Start Time</Box>
+                {showEndTime && (
+                    <Box bg="blue.400" border="1px solid black" display="flex" alignItems="center" justifyContent="center" fontWeight="bold" fontSize="sm">End Time</Box>
+                )}
                 {Object.keys(dayToCol).map(day => (
                     <Box key={day} bg="blue.400" border="1px solid black" display="flex" alignItems="center" justifyContent="center" fontWeight="bold">
                         {day}
-
                     </Box>
                 ))}
 
                 {/* Time Labels */}
                 {sortedTimes.map((t, i) => (
-                    <Box key={`time-${t}`} gridColumn="1" gridRow={i + 2} bg="blue.400" border="1px solid black" display="flex" alignItems="center" justifyContent="center" fontWeight="bold">
-                        {t}
-                    </Box>
+                    <React.Fragment key={`time-fragment-${t}`}>
+                        <Box gridColumn="1" gridRow={i + 2} bg="blue.400" border="1px solid black" display="flex" alignItems="center" justifyContent="center" fontWeight="bold">
+                            {t}
+                        </Box>
+                        {showEndTime && (
+                            <Box gridColumn="2" gridRow={i + 2} bg="blue.400" border="1px solid black" display="flex" alignItems="center" justifyContent="center" fontWeight="bold">
+                                {i < sortedTimes.length - 1 ? sortedTimes[i + 1] : "—"}
+                            </Box>
+                        )}
+                    </React.Fragment>
                 ))}
 
                 {/* Empty Cells */}
@@ -1062,6 +1220,246 @@ function ScheduleItem() {
                     const rowSpan = endRow - startRow;
                     const isBeingDragged = selectedBlockIndex === i;
 
+                    // Check if this block is part of an overlap
+                    const overlap = getOverlaps().find(o => 
+                        o.blocks.some(b => 
+                            b.start.day === block.start.day && 
+                            b.start.time === block.start.time && 
+                            b.end.time === block.end.time &&
+                            b.subjectId === block.subjectId
+                        )
+                    );
+                    
+                    // If this block is part of an overlap, we'll render it differently
+                    if (overlap) {
+                        const overlapBlockIndex = overlap.blocks.findIndex(b => 
+                            b.start.day === block.start.day && 
+                            b.start.time === block.start.time && 
+                            b.end.time === block.end.time &&
+                            b.subjectId === block.subjectId
+                        );
+                        
+                        // Only render the overlap container for the first block in the overlap
+                        if (overlapBlockIndex === 0) {
+                            return (
+                                <Box
+                                    key={`overlap-container-${i}`}
+                                    gridColumn={col}
+                                    gridRow={`${startRow} / span ${rowSpan}`}
+                                    position="relative"
+                                    border="3px solid red"
+                                    borderRadius="md"
+                                    overflow="hidden"
+                                    zIndex={2}
+                                >
+                                    {/* OVERLAP Label */}
+                                    <Box
+                                        position="absolute"
+                                        top="2px"
+                                        left="50%"
+                                        transform="translateX(-50%)"
+                                        bg="red.500"
+                                        color="white"
+                                        fontWeight="bold"
+                                        fontSize="xs"
+                                        px={2}
+                                        py={1}
+                                        borderRadius="sm"
+                                        zIndex={5}
+                                        border="1px solid red.700"
+                                        boxShadow="0 1px 3px rgba(0,0,0,0.3)"
+                                    >
+                                        ⚠️ OVERLAP
+                                    </Box>
+                                    
+                                    {/* Side by side blocks */}
+                                    <Box
+                                        display="flex"
+                                        height="100%"
+                                    >
+                                        {overlap.blocks.map((overlapBlock, blockIdx) => {
+                                            const originalBlockIndex = timeblocks.findIndex(tb => 
+                                                tb.start.day === overlapBlock.start.day && 
+                                                tb.start.time === overlapBlock.start.time && 
+                                                tb.end.time === overlapBlock.end.time &&
+                                                tb.subjectId === overlapBlock.subjectId
+                                            );
+                                            const isSelected = selectedBlockIndex === originalBlockIndex;
+                                            
+                                            return (
+                                                <Box
+                                                    key={`overlap-block-${blockIdx}`}
+                                                    flex={1}
+                                                    bg={overlapBlock.color || "teal.400"}
+                                                    color="black"
+                                                    display="flex"
+                                                    alignItems="center"
+                                                    justifyContent="center"
+                                                    textAlign="center"
+                                                    px={1}
+                                                    fontWeight="bold"
+                                                    fontSize="sm"
+                                                    border={isSelected ? "3px solid blue" : blockIdx > 0 ? "1px solid white" : "none"}
+                                                    borderLeft={blockIdx > 0 ? "2px solid white" : "none"}
+                                                    position="relative"
+                                                    cursor="pointer"
+                                                    draggable={!resizing}
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setSelectedBlockIndex(originalBlockIndex);
+                                                    }}
+                                                    onDoubleClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setEditingBlock({
+                                                            index: originalBlockIndex,
+                                                            start: overlapBlock.start.time,
+                                                            end: overlapBlock.end.time,
+                                                        });
+                                                    }}
+                                                    onDragStart={(e) => {
+                                                        if (resizing) { e.preventDefault(); return; }
+                                                        e.dataTransfer.setData("existing_block_index", originalBlockIndex.toString());
+                                                        setDraggedSubjectId(overlapBlock.subjectId);
+                                                        setDraggedSubjectData(overlapBlock);
+                                                        setHoverSubject(overlapBlock);
+                                                        setDraggedBlockIndex(originalBlockIndex);
+                                                        if (item?.type === "Student" && overlapBlock.teachers?.length) {
+                                                            fetchTeacherBusyRanges(overlapBlock);
+                                                        }
+                                                    }}
+                                                    onDragOver={(e) => {
+                                                        e.preventDefault();
+                                                        e.stopPropagation();
+                                                        setShiftHeld(e.shiftKey);
+                                                        setCmdHeld(e.metaKey);
+                                                        setDragHover(null);
+                                                        setStableHoverTime(null);
+                                                        
+                                                        if (draggedBlockIndex !== null && draggedBlockIndex !== originalBlockIndex) {
+                                                            const rect = e.currentTarget.getBoundingClientRect();
+                                                            const x = e.clientX - rect.left;
+                                                            const side = x < rect.width / 2 ? 'swap' : 'replace';
+                                                            setSwapReplaceHover({ blockIndex: originalBlockIndex, side });
+                                                        }
+                                                    }}
+                                                    onDragEnter={(e) => {
+                                                        e.preventDefault();
+                                                        e.stopPropagation();
+                                                        setDragHover(null);
+                                                        setStableHoverTime(null);
+                                                        
+                                                        if (draggedBlockIndex !== null && draggedBlockIndex !== originalBlockIndex) {
+                                                            const rect = e.currentTarget.getBoundingClientRect();
+                                                            const x = e.clientX - rect.left;
+                                                            const side = x < rect.width / 2 ? 'swap' : 'replace';
+                                                            setSwapReplaceHover({ blockIndex: originalBlockIndex, side });
+                                                        }
+                                                    }}
+                                                    onDragLeave={(e) => {
+                                                        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                                                            setSwapReplaceHover(null);
+                                                        }
+                                                    }}
+                                                    onDrop={(e) => {
+                                                        e.preventDefault();
+                                                        e.stopPropagation();
+                                                        
+                                                        if (draggedBlockIndex !== null && draggedBlockIndex !== originalBlockIndex && swapReplaceHover) {
+                                                            if (swapReplaceHover.side === 'swap') {
+                                                                handleSwapBlocks(draggedBlockIndex, originalBlockIndex);
+                                                            } else {
+                                                                handleReplaceBlock(draggedBlockIndex, originalBlockIndex);
+                                                            }
+                                                        }
+                                                        
+                                                        setSwapReplaceHover(null);
+                                                        setDraggedBlockIndex(null);
+                                                        setDragHover(null);
+                                                        setHoverSubject(null);
+                                                        setLoadedSubjectId(null);
+                                                        setStableHoverTime(null);
+                                                        setShiftHeld(false);
+                                                        setCmdHeld(false);
+                                                        setOverlappingTeacherSchedules([]);
+                                                    }}
+                                                    onDragEnd={() => {
+                                                        setDragHover(null);
+                                                        setHoverSubject(null);
+                                                        setLoadedSubjectId(null);
+                                                        setSelectedBlockIndex(null);
+                                                        setOverlappingTeacherSchedules([]);
+                                                        setSwapReplaceHover(null);
+                                                        setDraggedBlockIndex(null);
+                                                        setDraggedTeacherBusy([]);
+                                                    }}
+                                                >
+                                                    {/* SWAP/REPLACE Overlay for overlapping blocks */}
+                                                    {swapReplaceHover && swapReplaceHover.blockIndex === originalBlockIndex && (
+                                                        <Box
+                                                            position="absolute"
+                                                            top={0}
+                                                            left={0}
+                                                            right={0}
+                                                            bottom={0}
+                                                            display="flex"
+                                                            zIndex={10}
+                                                            borderRadius="md"
+                                                            overflow="hidden"
+                                                        >
+                                                            <Box
+                                                                flex={1}
+                                                                bg={swapReplaceHover.side === 'swap' ? 'blue.300' : 'blue.100'}
+                                                                display="flex"
+                                                                alignItems="center"
+                                                                justifyContent="center"
+                                                                fontWeight="bold"
+                                                                fontSize="xs"
+                                                                borderRight="1px solid white"
+                                                                color="white"
+                                                                textShadow="1px 1px 2px rgba(0,0,0,0.8)"
+                                                            >
+                                                                SWAP
+                                                            </Box>
+                                                            <Box
+                                                                flex={1}
+                                                                bg={swapReplaceHover.side === 'replace' ? 'red.300' : 'red.100'}
+                                                                display="flex"
+                                                                alignItems="center"
+                                                                justifyContent="center"
+                                                                fontWeight="bold"
+                                                                fontSize="xs"
+                                                                color="white"
+                                                                textShadow="1px 1px 2px rgba(0,0,0,0.8)"
+                                                            >
+                                                                REPLACE
+                                                            </Box>
+                                                        </Box>
+                                                    )}
+                                                    
+                                                    <VStack spacing={0} pointerEvents="none">
+                                                        <Box>{cropSemesterTag(overlapBlock.name)}</Box>
+                                                        {item.type === "Teacher" && overlapBlock.displayclass && (
+                                                            <Box fontWeight="normal" fontSize="xs">{cropSemesterTag(overlapBlock.displayclass)}</Box>
+                                                        )}
+                                                        {item.type === "Student" && overlapBlock.teachers?.length > 0 && (
+                                                            <Box fontWeight="normal" fontSize="xs">
+                                                                {overlapBlock.teachers.map((t: string, idx: number) => cropSemesterTag(t)).join(", ")}
+                                                            </Box>
+                                                        )}
+                                                    </VStack>
+                                                </Box>
+                                            );
+                                        })}
+                                    </Box>
+                                </Box>
+                            );
+                        } else {
+                            // Skip rendering individual blocks that are part of overlaps (except the first one)
+                            return null;
+                        }
+                    }
+
+                    // Regular non-overlapping block rendering
                     return (
                         <Box
                             key={`block-${i}`}
@@ -1222,13 +1620,13 @@ function ScheduleItem() {
                             )}
 
                             <VStack spacing={0} pointerEvents="none">
-                                <Box>{block.name}</Box>
+                                <Box>{cropSemesterTag(block.name)}</Box>
                                 {item.type === "Teacher" && block.displayclass && (
-                                    <Box fontWeight="normal" fontSize="sm">{block.displayclass}</Box>
+                                    <Box fontWeight="normal" fontSize="sm">{cropSemesterTag(block.displayclass)}</Box>
                                 )}
                                 {item.type === "Student" && block.teachers?.length > 0 && (
                                     <Box fontWeight="normal" fontSize="sm">
-                                        {block.teachers.join(", ")}
+                                        {block.teachers.map((t: string, idx: number) => cropSemesterTag(t)).join(", ")}
                                     </Box>
                                 )}
                             </VStack>
@@ -1410,21 +1808,37 @@ function ScheduleItem() {
                     }
 
                     const isEnd = t === projectedEndTime;
+                    const endTime = i < sortedTimes.length - 1 ? sortedTimes[i + 1] : "—";
 
                     return (
-                        <Box
-                            key={`time-${t}`}
-                            gridColumn="1"
-                            gridRow={i + 2}
-                            bg={isEnd ? "blue.400" : "blue.400"}
-                            border="1px solid black"
-                            display="flex"
-                            alignItems="center"
-                            justifyContent="center"
-                            fontWeight={isEnd ? "extrabold" : "bold"}
-                        >
-                            {t}
-                        </Box>
+                        <React.Fragment key={`time-highlight-${t}`}>
+                            <Box
+                                gridColumn="1"
+                                gridRow={i + 2}
+                                bg={isEnd ? "blue.400" : "blue.400"}
+                                border="1px solid black"
+                                display="flex"
+                                alignItems="center"
+                                justifyContent="center"
+                                fontWeight={isEnd ? "extrabold" : "bold"}
+                            >
+                                {t}
+                            </Box>
+                            {showEndTime && (
+                                <Box
+                                    gridColumn="2"
+                                    gridRow={i + 2}
+                                    bg={isEnd ? "blue.400" : "blue.400"}
+                                    border="1px solid black"
+                                    display="flex"
+                                    alignItems="center"
+                                    justifyContent="center"
+                                    fontWeight={isEnd ? "extrabold" : "bold"}
+                                >
+                                    {endTime}
+                                </Box>
+                            )}
+                        </React.Fragment>
                     );
                 })}
                 {editingBlock && (() => {
@@ -1507,53 +1921,6 @@ function ScheduleItem() {
                         </Box>
                     );
                 })()}
-                {getOverlaps().map((overlap, i) => {
-                    const col = dayToCol[overlap.day];
-                    const startRow = timeToRowIndex[overlap.start];
-                    const endRow = timeToRowIndex[overlap.end];
-                    const rowSpan = endRow - startRow;
-                    const label = `${overlap.blocks[0].name} & ${overlap.blocks[1].name} (OVERLAP)`;
-
-                    return (
-                        <Box
-                            key={`overlap-${i}`}
-                            gridColumn={col}
-                            gridRow={`${startRow} / span ${rowSpan}`}
-                            bg="red.100"
-                            color="red.800"
-                            fontWeight="bold"
-                            fontSize="xs"
-                            display="flex"
-                            alignItems="center"
-                            justifyContent="center"
-                            zIndex={5}
-                            border="2px dashed red"
-                            pointerEvents="auto"
-                            onMouseDown={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                // Could default to moving the first block, or pick based on y-position
-                                const rect = (e.target as HTMLElement).getBoundingClientRect();
-                                const yRel = e.clientY - rect.top;
-                                const moveTop = yRel < rect.height / 2;
-                                const blockToMove = moveTop ? overlap.blocks[0] : overlap.blocks[1];
-
-                                const index = timeblocks.findIndex(tb =>
-                                    tb.subjectId === blockToMove.subjectId &&
-                                    tb.start.time === blockToMove.start.time &&
-                                    tb.start.day === blockToMove.start.day
-                                );
-                                if (index !== -1) {
-                                    setSelectedBlockIndex(index);
-                                    setDraggedSubjectId(blockToMove.subjectId);
-                                    setDraggedSubjectData(blockToMove);
-                                }
-                            }}
-                        >
-                            {label}
-                        </Box>
-                    );
-                })}
                 {item?.type === "Teacher" && busyRanges.map((range, i) => {
                     const col = dayToCol[range.start.day];
 

@@ -30,8 +30,9 @@ import {
 } from '@chakra-ui/react';
 import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, EditIcon, CopyIcon} from "@chakra-ui/icons";
 import {FaThumbtack} from "react-icons/fa";
-import { useNavigate } from 'react-router-dom';
-const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app/";
+import { useNavigate, Link } from 'react-router-dom';
+import { usePageTitle } from '../utils/usePageTitle';
+const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app";
 
 interface User {
     full_name: string;
@@ -40,6 +41,9 @@ interface User {
 }
 
 function Teachers() {
+    // Set page title
+    usePageTitle('Teachers - Schedule Manager');
+    
     const [user, setUser] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
     const [teachers, setTeachers] = useState<any[]>([]);
@@ -333,12 +337,15 @@ function Teachers() {
                                     {pinned.map((teacher) => (
                                         <Box
                                             key={`pinned-${teacher._id?.$oid}`}
+                                            as={Link}
+                                            to={`/schedule/${teacher._id?.$oid}`}
                                             p={3}
                                             bg="#daf7e6"
                                             borderRadius="md"
-                                            onClick={() => navigate(`/schedule/${teacher._id?.$oid}`)}
                                             cursor="pointer"
                                             _hover={{ bg: "#def" }}
+                                            textDecoration="none"
+                                            display="block"
                                             // borderLeft={`7px solid ${teacher.color}`}
                                         >
                                             <HStack justify="space-between">
@@ -362,6 +369,7 @@ function Teachers() {
                                                                     required_teach: teacher.required_teach?.map((s: any) => s.$oid) || [],
                                                                 });
                                                                 onOpen();
+                                                                e.preventDefault();
                                                                 e.stopPropagation();
                                                             }}
                                                         />
@@ -373,7 +381,7 @@ function Teachers() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="orange"
-                                                            onClick={(e) => {e.stopPropagation(); togglePin(teacher._id.$oid)}}
+                                                            onClick={(e) => {e.preventDefault(); e.stopPropagation(); togglePin(teacher._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Delete">
@@ -383,7 +391,7 @@ function Teachers() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="red"
-                                                            onClick={(e) => {e.stopPropagation(); handleDelete(teacher._id.$oid)}}
+                                                            onClick={(e) => {e.preventDefault(); e.stopPropagation(); handleDelete(teacher._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Duplicate">
@@ -394,6 +402,7 @@ function Teachers() {
                                                             size="sm"
                                                             colorScheme="purple"
                                                             onClick={(e) => {
+                                                                e.preventDefault();
                                                                 e.stopPropagation();
                                                                 setIsEditMode(false);
                                                                 setCurrentTeacher({
@@ -418,12 +427,15 @@ function Teachers() {
                                     {unpinned.map((teacher) => (
                                         <Box
                                             key={`unpinned-${teacher._id?.$oid}`}
+                                            as={Link}
+                                            to={`/schedule/${teacher._id?.$oid}`}
                                             p={3}
                                             bg="#e1f5e9"
                                             borderRadius="md"
-                                            onClick={() => navigate(`/schedule/${teacher._id?.$oid}`)}
                                             cursor="pointer"
                                             _hover={{ bg: "#def" }}
+                                            textDecoration="none"
+                                            display="block"
                                             // borderLeft={`7px solid ${teacher.color}`}
                                         >
                                             <HStack justify="space-between">
@@ -440,7 +452,6 @@ function Teachers() {
                                                             variant="ghost"
                                                             size="sm"
                                                             onClick={(e) => {
-
                                                                 setIsEditMode(true);
                                                                 setCurrentTeacher({
                                                                     ...teacher,
@@ -448,6 +459,7 @@ function Teachers() {
                                                                     required_teach: teacher.required_teach?.map((s: any) => s.$oid) || [],
                                                                 });
                                                                 onOpen();
+                                                                e.preventDefault();
                                                                 e.stopPropagation();
                                                             }}
                                                         />
@@ -459,7 +471,7 @@ function Teachers() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="gray"
-                                                            onClick={(e) => {e.stopPropagation(); togglePin(teacher._id.$oid)}}
+                                                            onClick={(e) => {e.preventDefault(); e.stopPropagation(); togglePin(teacher._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Delete">
@@ -469,7 +481,7 @@ function Teachers() {
                                                             variant="ghost"
                                                             size="sm"
                                                             colorScheme="red"
-                                                            onClick={(e) => {e.stopPropagation(); handleDelete(teacher._id.$oid)}}
+                                                            onClick={(e) => {e.preventDefault(); e.stopPropagation(); handleDelete(teacher._id.$oid)}}
                                                         />
                                                     </Tooltip>
                                                     <Tooltip label="Duplicate">
@@ -480,6 +492,7 @@ function Teachers() {
                                                             size="sm"
                                                             colorScheme="purple"
                                                             onClick={(e) => {
+                                                                e.preventDefault();
                                                                 e.stopPropagation();
                                                                 setIsEditMode(false);
                                                                 setCurrentTeacher({

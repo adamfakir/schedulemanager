@@ -5,7 +5,7 @@ import {Box, Flex, Button, Spacer, Heading, HStack, VStack, Center, Icon, Divide
     MenuList,
     MenuItem,
     IconButton,  Tabs, TabList, TabPanels, Tab, TabPanel, Input, Text } from '@chakra-ui/react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { ArrowDownIcon, HamburgerIcon} from '@chakra-ui/icons'
 import { AvailabilityContext } from '../utils/AvailabilityContext';
 import { teacherCacheGlobal, subjectCacheGlobal } from '../utils/globalCache';
@@ -88,13 +88,19 @@ import {
         if (!token || item?.type !== "Teacher" || !item._id) return;
         console.log(newAvailability);
         try {
-
             await axios.put(
                 `https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/${item._id.$oid || item._id}/update`,
                 { availability: newAvailability },
                 { headers: { Authorization: token } }
             );
             console.log("✅ Availability saved.");
+            // Refresh teacher cache after update
+            const allRes = await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/all_org_teachers`, {
+                headers: { Authorization: token }
+            });
+            const allTeachers = allRes.data || [];
+            teacherCacheGlobal.current = allTeachers;
+            localStorage.setItem('teacherCacheGlobal', JSON.stringify({ data: allTeachers, ts: Date.now() }));
         } catch (err) {
             console.error("❌ Failed to save availability:", err);
         }
@@ -104,37 +110,65 @@ import {
         if (!isSchedulePage || !location.pathname.startsWith('/schedule/')) return;
         const id = location.pathname.split('/schedule/')[1];
         setScheduleId(id);
+        const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+        const now = Date.now();
+        // Helper to get/set cache with timestamp
+        const getCache = (key: string) => {
+            const raw = localStorage.getItem(key);
+            if (!raw) return null;
+            try {
+                const { data, ts } = JSON.parse(raw);
+                if (now - ts < CACHE_TTL) return data;
+            } catch {}
+            return null;
+        };
+        const setCache = (key: string, data: any) => {
+            localStorage.setItem(key, JSON.stringify({ data, ts: now }));
+        };
         const fetchTypeAndSubjects = async () => {
+            let subjCache = getCache('subjectCacheGlobal');
+            let teacherCache = getCache('teacherCacheGlobal');
+            let studentCache = getCache('studentCacheGlobal');
+            // Fetch all in parallel if needed
+            const fetches = [];
+            if (!subjCache) fetches.push(
+                axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/subject/all_org_subjects`, { headers: { Authorization: token! } })
+            );
+            if (!teacherCache) fetches.push(
+                axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/all_org_teachers`, { headers: { Authorization: token! } })
+            );
+            if (!studentCache) fetches.push(
+                axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/student/all_org_students`, { headers: { Authorization: token! } })
+            );
+            let fetchIdx = 0;
+            if (!subjCache) {
+                const res = await fetches[fetchIdx++];
+                subjCache = res.data || [];
+                setCache('subjectCacheGlobal', subjCache);
+            }
+            if (!teacherCache) {
+                const res = await fetches[fetchIdx++];
+                teacherCache = res.data || [];
+                setCache('teacherCacheGlobal', teacherCache);
+            }
+            if (!studentCache) {
+                const res = await fetches[fetchIdx++];
+                studentCache = res.data || [];
+                setCache('studentCacheGlobal', studentCache);
+            }
+            subjectCacheGlobal.current = subjCache;
+            teacherCacheGlobal.current = teacherCache;
+            // Student/teacher fetch logic
             try {
                 const res = await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/student/${id}`, {
-                    headers: { Authorization: token },
+                    headers: { Authorization: token! },
                 });
                 setScheduleType("Student");
-                setItem(res.data);  // <--- Add this
-                const allStudentsRes = await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/student/all_org_students`, {
-                    headers: { Authorization: token },
-                });
-                const allStudents = allStudentsRes.data || [];
-                setAllStudents(allStudents);
-                // Fetch subjects (use cache if available)
-                if (!subjectCacheGlobal.current) {
-                    const subjRes = await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/subject/all_org_subjects`, {
-                        headers: { Authorization: token },
-                    });
-                    subjectCacheGlobal.current = subjRes.data || [];
-                }
-                setSubjects(subjectCacheGlobal.current || []);
-                // Fetch teachers (use cache if available)
-                if (!teacherCacheGlobal.current) {
-                    const teacherRes = await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/all_org_teachers`, {
-                        headers: { Authorization: token },
-                    });
-                    teacherCacheGlobal.current = teacherRes.data || [];
-                }
-                const allTeachers = teacherCacheGlobal.current || [];
+                setItem(res.data);
+                setAllStudents(studentCache || []);
                 // Attach teacher names
-                const enrichedSubjects = (subjectCacheGlobal.current || []).map((subject: any) => {
-                    const requiredTeacherNames = allTeachers
+                const enrichedSubjects = (subjCache || []).map((subject: any) => {
+                    const requiredTeacherNames = (teacherCache || [])
                         .filter((t: any) =>
                             (t.required_teach || []).some((sid: any) =>
                                 (sid.$oid || sid) === (subject._id?.$oid || subject._id)
@@ -151,29 +185,18 @@ import {
                 try {
                     const teacherRes = await axios.get(
                         `https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/${id}`,
-                        { headers: { Authorization: token } }
+                        { headers: { Authorization: token! } }
                     );
                     const teacherData = { ...teacherRes.data, type: "Teacher" };
                     setItem(teacherData);
                     setScheduleType("Teacher");
                     setAvailability(teacherData.availability || []);
-                    const allStudentsRes = await axios.get(
-                        `https://schedulebackendapi-3an8u.ondigitalocean.app/student/all_org_students`,
-                        { headers: { Authorization: token } }
-                    );
-                    setAllStudents(allStudentsRes.data || []);
-                    if (!subjectCacheGlobal.current) {
-                        const subjRes = await axios.get(
-                            `https://schedulebackendapi-3an8u.ondigitalocean.app/subject/all_org_subjects`,
-                            { headers: { Authorization: token } }
-                        );
-                        subjectCacheGlobal.current = subjRes.data;
-                    }
-                    setSubjects(subjectCacheGlobal.current || []);
+                    setAllStudents(studentCache || []);
+                    setSubjects(subjCache || []);
                 } catch {
                     try {
                         await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/subject/${id}`, {
-                            headers: { Authorization: token },
+                            headers: { Authorization: token! },
                         });
                         setScheduleType("Subject");
                     } catch {
@@ -183,11 +206,35 @@ import {
             }
         };
         fetchTypeAndSubjects();
-
+        // Background cache refresher
+        let interval: NodeJS.Timeout | undefined;
+        if (token) {
+            interval = setInterval(async () => {
+                try {
+                    const [subjRes, teacherRes, studentRes] = await Promise.all([
+                        axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/subject/all_org_subjects`, { headers: { Authorization: token } }),
+                        axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/all_org_teachers`, { headers: { Authorization: token } }),
+                        axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/student/all_org_students`, { headers: { Authorization: token } })
+                    ]);
+                    const subjData = subjRes.data || [];
+                    const teacherData = teacherRes.data || [];
+                    const studentData = studentRes.data || [];
+                    setCache('subjectCacheGlobal', subjData);
+                    setCache('teacherCacheGlobal', teacherData);
+                    setCache('studentCacheGlobal', studentData);
+                    subjectCacheGlobal.current = subjData;
+                    teacherCacheGlobal.current = teacherData;
+                } catch (err) {
+                    // ignore
+                }
+            }, 30000); // every 30 seconds
+        }
         const pinned = localStorage.getItem('pinned_subject_ids');
         if (pinned) {
             setPinnedSubjectIds(JSON.parse(pinned));
         }
+        // Cleanup
+        return () => { if (interval) clearInterval(interval); };
     }, [location]);
     const handleLogout = () => {
         localStorage.removeItem('user_token');
@@ -224,6 +271,42 @@ import {
 
         const sortedRequired = sortSubjects(requiredSubjects);
         const sortedOptional = sortSubjects(optionalSubjects);
+        // Helper to get minutes from HH:MM
+        const timeToMinutes = (time: string) => {
+            const [h, m] = time.split(":").map(Number);
+            return h * 60 + m;
+        };
+        // Categorize required subjects by completion
+        const categorizedRequired = (() => {
+            const notCompleted: any[] = [];
+            const completed: any[] = [];
+            for (const s of sortedRequired) {
+                const minwd = s.minwd || 0;
+                const maxwd = s.maxwd || 0;
+                const minld = s.minld || 1;
+                const maxld = s.maxld || 1;
+                const avgWeekly = (minwd + maxwd) / 2;
+                const avgPeriod = (minld + maxld) / 2 || 1;
+                const X = avgWeekly / avgPeriod;
+                let totalMinutes = 0;
+                if (s.timeblocks && Array.isArray(s.timeblocks)) {
+                    for (const tb of s.timeblocks) {
+                        if (tb.start && tb.end && tb.start.time && tb.end.time && tb.start.day && tb.end.day) {
+                            if (tb.start.day === tb.end.day) {
+                                totalMinutes += timeToMinutes(tb.end.time) - timeToMinutes(tb.start.time);
+                            }
+                        }
+                    }
+                }
+                const Y = totalMinutes / avgPeriod;
+                if (Y / X < 1) {
+                    notCompleted.push({ s, X, Y });
+                } else {
+                    completed.push({ s, X, Y });
+                }
+            }
+            return [...notCompleted, ...completed];
+        })();
         return (
             <Flex
                 direction="column"
@@ -244,9 +327,9 @@ import {
                         aria-label="Options"
                     />
                     <MenuList>
-                        <MenuItem onClick={() => navigate('/subjects')}>Subjects</MenuItem>
-                        <MenuItem onClick={() => navigate('/teachers')}>Teachers</MenuItem>
-                        <MenuItem onClick={() => navigate('/students')}>Students</MenuItem>
+                        <MenuItem as={Link} to="/subjects">Subjects</MenuItem>
+                        <MenuItem as={Link} to="/teachers">Teachers</MenuItem>
+                        <MenuItem as={Link} to="/students">Students</MenuItem>
                         <MenuItem onClick={handleLogout} color="red">Logout</MenuItem>
                     </MenuList>
                 </Menu>
@@ -269,22 +352,21 @@ import {
                                 />
                                 <VStack align="center" spacing={2} maxH="60vh" overflowY="auto">
                                     {/* Required Subjects */}
-                                    {sortedRequired.map(s => (
+                                    {categorizedRequired.map(({ s, X, Y }) => (
                                         <Box
                                             key={s._id?.$oid}
+                                            as={Link}
+                                            to={`/schedule/${s._id?.$oid}`}
                                             draggable
-                                            onDragStart={(e) => {
+                                            onDragStart={(e: React.DragEvent) => {
                                                 e.dataTransfer.setData("subject_id", s._id?.$oid);
                                                 setDraggedSubjectId(s._id?.$oid);
                                                 setDraggedSubjectData(s);
                                                 e.dataTransfer.effectAllowed = "move";
-                                                // 👈 this matches the dropEffect// <-- you'll create this
                                             }}
                                             onDragEnd={() => {
-                                                // Tell the schedule to clear hover state
                                                 window.dispatchEvent(new CustomEvent("clearDragPreview"));
                                             }}
-
                                             w="100%"
                                             bg={s.color || "teal.400"}
                                             color="black"
@@ -299,24 +381,28 @@ import {
                                             borderRadius="md"
                                             cursor="pointer"
                                             _hover={{ opacity: 0.9 }}
-                                            onClick={() => navigate(`/schedule/${s._id?.$oid}`)}
+                                            textDecoration="none"
                                         >
                                             <VStack spacing={0} w="100%">
                                                 <Text fontWeight="bold" fontSize="md">{s.displayname || s.name}</Text>
+                                                {/* Show Y/X periods info */}
+                                                <Text fontSize="sm" color="gray.700" fontWeight="normal">
+                                                    {`${Y.toFixed(1)} / ${X.toFixed(1)} periods`}
+                                                </Text>
                                                 { s.teachers && s.teachers.length > 0 && (
                                                     <HStack wrap="wrap" justify="center">
                                                         {s.teachers.map((t: any, idx: number) => (
                                                             <Text
                                                                 key={t.id || idx}
+                                                                as={Link}
+                                                                to={`/schedule/${t.id}`}
                                                                 fontSize="sm"
                                                                 fontWeight="normal"
-                                                                // textDecoration="underline"
                                                                 color="blackAlpha"
                                                                 cursor="pointer"
                                                                 _hover={{ textDecoration: "underline", color: "blue.800" }}
                                                                 onClick={(e) => {
-                                                                    e.stopPropagation(); // 👈 prevent subject box click
-                                                                    navigate(`/schedule/${t.id}`);
+                                                                    e.stopPropagation();
                                                                 }}
                                                             >
                                                                 {t.name}
@@ -341,6 +427,8 @@ import {
                                     {showAllSubjects && sortedOptional.map(s => (
                                         <Box
                                             key={s._id?.$oid}
+                                            as={Link}
+                                            to={`/schedule/${s._id?.$oid}`}
                                             w="100%"
                                             bg={s.color || "gray.300"}
                                             color="black"
@@ -355,7 +443,7 @@ import {
                                             borderRadius="md"
                                             cursor="pointer"
                                             _hover={{ opacity: 0.9 }}
-                                            onClick={() => navigate(`/schedule/${s._id?.$oid}`)}
+                                            textDecoration="none"
                                         >
                                             <VStack spacing={0} w="100%">
                                                 <Text fontWeight="bold" fontSize="md">{s.displayname || s.name}</Text>
@@ -364,6 +452,8 @@ import {
                                                         {s.teachers.map((t: any, idx: number) => (
                                                             <Text
                                                                 key={t.id || idx}
+                                                                as={Link}
+                                                                to={`/schedule/${t.id}`}
                                                                 fontSize="sm"
                                                                 fontWeight="normal"
                                                                 // textDecoration="underline"
@@ -372,7 +462,6 @@ import {
                                                                 _hover={{ textDecoration: "underline", color: "blue.800" }}
                                                                 onClick={(e) => {
                                                                     e.stopPropagation(); // 👈 prevent subject box click
-                                                                    navigate(`/schedule/${t.id}`);
                                                                 }}
                                                             >
                                                                 {t.name}
@@ -408,6 +497,8 @@ import {
                                             return (
                                                 <Box
                                                     key={s._id?.$oid || s._id}
+                                                    as={Link}
+                                                    to={`/schedule/${s._id?.$oid || s._id}`}
                                                     w="100%"
                                                     bg="green.100"
                                                     color="black"
@@ -419,7 +510,8 @@ import {
                                                     borderRadius="md"
                                                     cursor="pointer"
                                                     _hover={{ opacity: 0.9 }}
-                                                    onClick={() => navigate(`/schedule/${s._id?.$oid || s._id}`)}
+                                                    textDecoration="none"
+                                                    display="block"
                                                 >
                                                     <VStack spacing={0}>
                                                         <Text fontWeight="bold">{s.displayname || s.name}</Text>
@@ -625,6 +717,8 @@ import {
                                                 return (
                                                     <Box
                                                         key={student._id.$oid || student._id}
+                                                        as={Link}
+                                                        to={`/schedule/${student._id.$oid || student._id}`}
                                                         w="100%"
                                                         bg="green.100"
                                                         color="black"
@@ -634,7 +728,8 @@ import {
                                                         borderRadius="md"
                                                         cursor="pointer"
                                                         _hover={{ opacity: 0.9 }}
-                                                        onClick={() => navigate(`/schedule/${student._id.$oid || student._id}`)}
+                                                        textDecoration="none"
+                                                        display="block"
                                                     >
                                                         <VStack spacing={0}>
                                                             <Text fontWeight="bold">
@@ -660,6 +755,8 @@ import {
                                             .map((subj: any) => (
                                                 <Box
                                                     key={subj._id.$oid || subj._id}
+                                                    as={Link}
+                                                    to={`/schedule/${subj._id.$oid || subj._id}`}
                                                     w="100%"
                                                     bg={subj.color || "gray.300"}
                                                     color="black"
@@ -669,7 +766,8 @@ import {
                                                     borderRadius="md"
                                                     cursor="pointer"
                                                     _hover={{ opacity: 0.9 }}
-                                                    onClick={() => navigate(`/schedule/${subj._id.$oid || subj._id}`)}
+                                                    textDecoration="none"
+                                                    display="block"
                                                 >
                                                     <VStack spacing={0}>
                                                         <Text fontWeight="bold" fontSize="md">
@@ -705,7 +803,7 @@ import {
             // justify="center"
         >
             <VStack align="center" spacing={2}>
-                <Heading fontSize="22px" color="black" onClick={() => navigate('/home')} cursor="pointer">
+                <Heading fontSize="22px" color="black" as={Link} to="/home" cursor="pointer">
                     Schedule Manager
                 </Heading>
                 <Divider
@@ -720,19 +818,19 @@ import {
                     {/*    Home*/}
                     {/*</Button>*/}
 
-                    <Button variant="ghost" size="lg" fontSize={"150%"} w="full"colorScheme='blackAlpha' onClick={() => navigate('/subjects')} color="black">
+                    <Button variant="ghost" size="lg" fontSize={"150%"} w="full" colorScheme='blackAlpha' as={Link} to="/subjects" color="black">
                         Subjects
                     </Button>
                     <Center w="full">
                         <ArrowDownIcon boxSize={5} color="black" />
                     </Center>
-                    <Button variant="ghost" size="lg"  fontSize={"150%"}w="full"colorScheme='blackAlpha' onClick={() => navigate('/teachers')} color="black">
+                    <Button variant="ghost" size="lg" fontSize={"150%"} w="full" colorScheme='blackAlpha' as={Link} to="/teachers" color="black">
                         Teachers
                     </Button>
                     <Center w="full">
                         <ArrowDownIcon boxSize={5} color="black" />
                     </Center>
-                    <Button variant="ghost" size="lg" fontSize={"150%"} w="full"colorScheme='blackAlpha' onClick={() => navigate('/students')} color="black">
+                    <Button variant="ghost" size="lg" fontSize={"150%"} w="full" colorScheme='blackAlpha' as={Link} to="/students" color="black">
                         Students
                     </Button>
 

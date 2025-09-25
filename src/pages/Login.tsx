@@ -3,11 +3,15 @@ import axios from 'axios';
 import {Box, Button, Center, Heading, VStack, Textarea, Input, useToast} from '@chakra-ui/react';
 import { useNavigate } from 'react-router-dom';
 import { useEffect } from 'react';
+import { usePageTitle } from '../utils/usePageTitle';
 // Inside your component:
 
 // src/Login.tsx
-const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app/";
+const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app";
 function Login() {
+    // Set page title
+    usePageTitle('Login - Schedule Manager');
+    
     const toast = useToast();
     let [email, setEmail] = React.useState('')
     let [password, setPassword] = React.useState('')
