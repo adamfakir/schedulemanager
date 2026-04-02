@@ -32,7 +32,7 @@ import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteI
 import {FaThumbtack} from "react-icons/fa";
 import { useNavigate, Link } from 'react-router-dom';
 import { usePageTitle } from '../utils/usePageTitle';
-const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app";
+import { API_BASE, getStudentsFromCache, getSubjectsFromCache, loadAllStudents, loadAllSubjects, loadUserSelf } from '../utils/apiClient';
 
 interface User {
     full_name: string;
@@ -76,12 +76,28 @@ function Students() {
             return;
         }
 
-        axios.get(`${API_BASE}/user/get_self`, {
-            headers: {Authorization: token},
-            withCredentials: true,
-        })
-            .then((res) => {
-                setUser(res.data);
+        const cachedStudents = getStudentsFromCache();
+        if (cachedStudents) {
+            setStudents(cachedStudents);
+            setFilteredStudents(cachedStudents);
+            const tags = new Set<string>();
+            cachedStudents.forEach((student: { tags: string[]; }) => {
+                student.tags?.forEach((tag: string) => tags.add(tag));
+            });
+            const tagArray = Array.from(tags);
+            setAvailableTags(tagArray);
+            setSelectedTags(tagArray);
+            setStudentsLoading(false);
+        }
+
+        const cachedSubjects = getSubjectsFromCache();
+        if (cachedSubjects) {
+            setAllSubjects(cachedSubjects);
+        }
+
+        loadUserSelf(token)
+            .then((data) => {
+                setUser(data);
             })
             .catch((err) => {
                 console.error('Failed to fetch user', err);
@@ -89,12 +105,9 @@ function Students() {
             .finally(() => {
                 setLoading(false);
             });
-        axios.get(`${API_BASE}/student/all_org_students`, {
-            headers: {Authorization: token},
-            withCredentials: true,
-        })
-            .then(res => {
-                const data = res.data;
+
+        loadAllStudents(token, { preferCache: false })
+            .then((data) => {
                 setStudents(data);
                 setFilteredStudents(data);
 
@@ -107,18 +120,16 @@ function Students() {
                 setAvailableTags(tagArray);
                 setSelectedTags(tagArray);
             })
-            .catch(err => {
+            .catch((err) => {
                 console.error("Failed to load students", err);
             })
             .finally(() => {
                 setStudentsLoading(false);
             });
-        axios.get(`${API_BASE}/subject/all_org_subjects`, {
-            headers: { Authorization: token },
-            withCredentials: true,
-        })
-            .then((res) => {
-                setAllSubjects(res.data);
+
+        loadAllSubjects(token, { preferCache: false })
+            .then((data) => {
+                setAllSubjects(data);
             })
             .catch((err) => console.error("Failed to load subjects", err));
     }, []);
@@ -147,7 +158,7 @@ function Students() {
 
 
         setFilteredStudents(results);
-    }, [searchTerm, selectedTags]);
+    }, [students, availableTags, searchTerm, selectedTags]);
     if (loading || studentsLoading) {
         return (
             <Center h="100vh">

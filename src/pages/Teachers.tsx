@@ -26,13 +26,13 @@ import {
     ModalContent,
     ModalFooter,
     ModalBody,
-    ModalCloseButton, ModalHeader, ModalOverlay, InputGroup, InputLeftElement, Collapse, Divider, Switch
+    ModalCloseButton, ModalHeader, ModalOverlay, InputGroup, InputLeftElement, Divider, Switch
 } from '@chakra-ui/react';
 import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, EditIcon, CopyIcon} from "@chakra-ui/icons";
 import {FaThumbtack} from "react-icons/fa";
 import { useNavigate, Link } from 'react-router-dom';
 import { usePageTitle } from '../utils/usePageTitle';
-const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app";
+import { API_BASE, getSubjectsFromCache, getTeachersFromCache, loadAllSubjects, loadAllTeachers, loadUserSelf } from '../utils/apiClient';
 
 interface User {
     full_name: string;
@@ -63,6 +63,7 @@ function Teachers() {
     const [allSubjects, setAllSubjects] = useState<any[]>([]);
     const [subjectSearch, setSubjectSearch] = useState("");
     const [subjectFilterMode, setSubjectFilterMode] = useState<"all" | "can_teach" | "required">("all");
+    const [expandedRequiredSubjects, setExpandedRequiredSubjects] = useState<Record<string, boolean>>({});
     const navigate = useNavigate();
     useEffect(() => {
         const storedPinned = localStorage.getItem('pinned_teacher_ids');
@@ -79,12 +80,28 @@ function Teachers() {
             return;
         }
 
-        axios.get(`${API_BASE}/user/get_self`, {
-            headers: {Authorization: token},
-            withCredentials: true,
-        })
-            .then((res) => {
-                setUser(res.data);
+        const cachedTeachers = getTeachersFromCache();
+        if (cachedTeachers) {
+            setTeachers(cachedTeachers);
+            setFilteredTeachers(cachedTeachers);
+            const tags = new Set<string>();
+            cachedTeachers.forEach((teacher: { tags: string[]; }) => {
+                teacher.tags?.forEach((tag: string) => tags.add(tag));
+            });
+            const tagArray = Array.from(tags);
+            setAvailableTags(tagArray);
+            setSelectedTags(tagArray);
+            setTeachersLoading(false);
+        }
+
+        const cachedSubjects = getSubjectsFromCache();
+        if (cachedSubjects) {
+            setAllSubjects(cachedSubjects);
+        }
+
+        loadUserSelf(token)
+            .then((data) => {
+                setUser(data);
             })
             .catch((err) => {
                 console.error('Failed to fetch user', err);
@@ -92,12 +109,9 @@ function Teachers() {
             .finally(() => {
                 setLoading(false);
             });
-        axios.get(`${API_BASE}/teacher/all_org_teachers`, {
-            headers: {Authorization: token},
-            withCredentials: true,
-        })
-            .then(res => {
-                const data = res.data;
+
+        loadAllTeachers(token, { preferCache: false })
+            .then((data) => {
                 setTeachers(data);
                 setFilteredTeachers(data);
 
@@ -110,18 +124,16 @@ function Teachers() {
                 setAvailableTags(tagArray);
                 setSelectedTags(tagArray);
             })
-            .catch(err => {
+            .catch((err) => {
                 console.error("Failed to load teachers", err);
             })
             .finally(() => {
                 setTeachersLoading(false);
             });
-        axios.get(`${API_BASE}/subject/all_org_subjects`, {
-            headers: { Authorization: token },
-            withCredentials: true,
-        })
-            .then((res) => {
-                setAllSubjects(res.data);
+
+        loadAllSubjects(token, { preferCache: false })
+            .then((data) => {
+                setAllSubjects(data);
             })
             .catch((err) => console.error("Failed to load subjects", err));
     }, []);
@@ -150,7 +162,7 @@ function Teachers() {
 
 
         setFilteredTeachers(results);
-    }, [searchTerm, selectedTags]);
+    }, [teachers, availableTags, searchTerm, selectedTags]);
     if (loading || teachersLoading) {
         return (
             <Center h="100vh">
@@ -253,6 +265,84 @@ function Teachers() {
             })
             .catch((err) => console.error("Delete failed", err));
     };
+
+    const handleCopyTeacherId = async (teacherId?: string) => {
+        if (!teacherId) return;
+        try {
+            await navigator.clipboard.writeText(teacherId);
+        } catch {
+            // Fallback for older browsers.
+            const el = document.createElement('textarea');
+            el.value = teacherId;
+            document.body.appendChild(el);
+            el.select();
+            document.execCommand('copy');
+            document.body.removeChild(el);
+        }
+    };
+
+    const toSubjectId = (raw: any): string => String(raw?.$oid || raw?.subject?.$oid || raw?.subject || raw?.id || raw || "");
+    const getTimeblockId = (tb: any): string => String(tb?.blockid || tb?.id || tb?.timeblockId || "");
+
+    const normalizeOverrides = (teacher: any) => {
+        const overrides = (teacher?.required_teach_overrides || []).map((ov: any) => ({
+            subject: toSubjectId(ov?.subject),
+            excludeextras: ov?.excludeextras,
+            extratimeblocks: Array.isArray(ov?.extratimeblocks) ? ov.extratimeblocks.map((id: any) => String(id)) : [],
+        })).filter((ov: any) => ov.subject);
+        return overrides;
+    };
+
+    const getOverrideForSubject = (teacher: any, subjectId: string) =>
+        normalizeOverrides(teacher).find((ov: any) => ov.subject === subjectId) || null;
+
+    const getSubjectTimeblockIds = (subjectId: string): string[] => {
+        const subject = allSubjects.find((s: any) => (s._id?.$oid || s._id) === subjectId);
+        return (subject?.timeblocks || []).map((tb: any) => getTimeblockId(tb)).filter(Boolean);
+    };
+
+    const isTimeblockSelected = (teacher: any, subjectId: string, blockId: string): boolean => {
+        const override = getOverrideForSubject(teacher, subjectId);
+        if (!override) return true;
+        const extra = new Set(override.extratimeblocks || []);
+        if (extra.size === 0) return true;
+        return override.excludeextras ? !extra.has(blockId) : extra.has(blockId);
+    };
+
+    const setSubjectOverride = (subjectId: string, excludeextras: boolean, selectedBlockIds: string[]) => {
+        setCurrentTeacher((prev: any) => {
+            const allIds = getSubjectTimeblockIds(subjectId);
+            const normalizedSelected = new Set(selectedBlockIds.filter(Boolean));
+            const extratimeblocks = excludeextras
+                ? allIds.filter((id) => !normalizedSelected.has(id))
+                : allIds.filter((id) => normalizedSelected.has(id));
+
+            const existing = normalizeOverrides(prev);
+            const next = existing.filter((ov: any) => ov.subject !== subjectId);
+            next.push({ subject: subjectId, excludeextras, extratimeblocks });
+
+            return {
+                ...prev,
+                required_teach_overrides: next,
+            };
+        });
+    };
+
+    const toggleMainTeacher = (subjectId: string, value: boolean) => {
+        const allIds = getSubjectTimeblockIds(subjectId);
+        const selected = allIds.filter((tbId) => isTimeblockSelected(currentTeacher, subjectId, tbId));
+        setSubjectOverride(subjectId, value, selected);
+    };
+
+    const toggleSubjectTimeblock = (subjectId: string, blockId: string, checked: boolean) => {
+        const allIds = getSubjectTimeblockIds(subjectId);
+        const selected = new Set(allIds.filter((tbId) => isTimeblockSelected(currentTeacher, subjectId, tbId)));
+        if (checked) selected.add(blockId);
+        else selected.delete(blockId);
+        const currentOverride = getOverrideForSubject(currentTeacher, subjectId);
+        const excludeMode = currentOverride ? !!currentOverride.excludeextras : true;
+        setSubjectOverride(subjectId, excludeMode, Array.from(selected));
+    };
     // @ts-ignore
     const sortedTeachers = [...filteredTeachers].sort((a, b) => {
         const aPinned = pinnedTeacherIds.includes(a._id?.$oid);
@@ -346,6 +436,9 @@ function Teachers() {
                                             _hover={{ bg: "#def" }}
                                             textDecoration="none"
                                             display="block"
+                                            onContextMenu={() => {
+                                                handleCopyTeacherId(teacher._id?.$oid);
+                                            }}
                                             // borderLeft={`7px solid ${teacher.color}`}
                                         >
                                             <HStack justify="space-between">
@@ -367,7 +460,9 @@ function Teachers() {
                                                                     ...teacher,
                                                                     can_teach: teacher.can_teach?.map((s: any) => s.$oid) || [],
                                                                     required_teach: teacher.required_teach?.map((s: any) => s.$oid) || [],
+                                                                    required_teach_overrides: normalizeOverrides(teacher),
                                                                 });
+                                                                setExpandedRequiredSubjects({});
                                                                 onOpen();
                                                                 e.preventDefault();
                                                                 e.stopPropagation();
@@ -411,7 +506,9 @@ function Teachers() {
                                                                     name: `${teacher.name} (Copy)`,
                                                                     can_teach: (teacher.can_teach || []).map((s: any) => s.$oid || s),
                                                                     required_teach: (teacher.required_teach || []).map((s: any) => s.$oid || s),
+                                                                    required_teach_overrides: normalizeOverrides(teacher),
                                                                 });
+                                                                setExpandedRequiredSubjects({});
                                                                 setDuplicateAvailability(false);
                                                                 onOpen();
                                                             }}
@@ -436,6 +533,9 @@ function Teachers() {
                                             _hover={{ bg: "#def" }}
                                             textDecoration="none"
                                             display="block"
+                                            onContextMenu={() => {
+                                                handleCopyTeacherId(teacher._id?.$oid);
+                                            }}
                                             // borderLeft={`7px solid ${teacher.color}`}
                                         >
                                             <HStack justify="space-between">
@@ -457,7 +557,9 @@ function Teachers() {
                                                                     ...teacher,
                                                                     can_teach: teacher.can_teach?.map((s: any) => s.$oid) || [],
                                                                     required_teach: teacher.required_teach?.map((s: any) => s.$oid) || [],
+                                                                    required_teach_overrides: normalizeOverrides(teacher),
                                                                 });
+                                                                setExpandedRequiredSubjects({});
                                                                 onOpen();
                                                                 e.preventDefault();
                                                                 e.stopPropagation();
@@ -501,7 +603,9 @@ function Teachers() {
                                                                     name: `${teacher.name} (Copy)`,
                                                                     can_teach: (teacher.can_teach || []).map((s: any) => s.$oid || s),
                                                                     required_teach: (teacher.required_teach || []).map((s: any) => s.$oid || s),
+                                                                    required_teach_overrides: normalizeOverrides(teacher),
                                                                 });
+                                                                setExpandedRequiredSubjects({});
                                                                 setDuplicateAvailability(false);
                                                                 onOpen();
                                                             }}
@@ -590,62 +694,119 @@ function Teachers() {
                                                 const id = subject._id?.$oid;
                                                 const isSelected = currentTeacher?.can_teach?.includes(id);
                                                 const isRequired = currentTeacher?.required_teach?.includes(id);
+                                                const override = getOverrideForSubject(currentTeacher, id);
+                                                const excludeMode = override ? !!override.excludeextras : true;
+                                                const timeblocks = subject.timeblocks || [];
+                                                const isExpanded = !!expandedRequiredSubjects[id];
 
                                                 return (
-                                                    <HStack key={id} spacing={3} align="center">
-                                                        <Box
-                                                            w={3}
-                                                            h={3}
-                                                            borderRadius="full"
-                                                            bg={subject.color || "gray.300"}
-                                                        />
-                                                        <Text flex={1}>{subject.name}</Text>
+                                                    <Box key={id} borderWidth="1px" borderColor="gray.200" borderRadius="md" p={2} bg="white">
+                                                        <HStack spacing={3} align="center">
+                                                            <Box
+                                                                w={3}
+                                                                h={3}
+                                                                borderRadius="full"
+                                                                bg={subject.color || "gray.300"}
+                                                            />
+                                                            <Text flex={1}>{subject.name}</Text>
 
-                                                        {/* Can Teach Switch */}
-                                                        <Switch
-                                                            size="sm"
-                                                            colorScheme="green"
-                                                            isChecked={isSelected}
-                                                            onChange={(e) => {
-                                                                setCurrentTeacher((prev: any) => {
-                                                                    const updated = { ...prev };
-                                                                    const list = new Set(updated.can_teach || []);
-                                                                    if (e.target.checked) {
-                                                                        list.add(id);
-                                                                    } else {
-                                                                        list.delete(id);
-                                                                        // Uncheck required if no longer can teach
-                                                                        updated.required_teach = (updated.required_teach || []).filter((rid: string) => rid !== id);
-                                                                    }
-                                                                    updated.can_teach = Array.from(list);
-                                                                    return updated;
-                                                                });
-                                                            }}
-                                                        />
-
-                                                        {/* Required Switch */}
-                                                        <Switch
-                                                            size="sm"
-                                                            colorScheme="red"
-                                                            isChecked={isRequired}
-                                                            onChange={(e) => {
-                                                                setCurrentTeacher((prev: any) => {
-                                                                    const updated = { ...prev };
-                                                                    const list = new Set(updated.required_teach || []);
-                                                                    if (e.target.checked) {
-                                                                        if (!updated.can_teach?.includes(id)) {
-                                                                            updated.can_teach = [...(updated.can_teach || []), id];
+                                                            {/* Can Teach Switch */}
+                                                            <Switch
+                                                                size="sm"
+                                                                colorScheme="green"
+                                                                isChecked={isSelected}
+                                                                onChange={(e) => {
+                                                                    setCurrentTeacher((prev: any) => {
+                                                                        const updated = { ...prev };
+                                                                        const list = new Set(updated.can_teach || []);
+                                                                        if (e.target.checked) {
+                                                                            list.add(id);
+                                                                        } else {
+                                                                            list.delete(id);
+                                                                            updated.required_teach = (updated.required_teach || []).filter((rid: string) => rid !== id);
+                                                                            updated.required_teach_overrides = normalizeOverrides(updated).filter((ov: any) => ov.subject !== id);
                                                                         }
-                                                                        list.add(id);
-                                                                    } else {
-                                                                        list.delete(id);
-                                                                    }
-                                                                    updated.required_teach = Array.from(list);
-                                                                    return updated;
-                                                                });
-                                                            }}
-                                                        />
-                                                    </HStack>
+                                                                        updated.can_teach = Array.from(list);
+                                                                        return updated;
+                                                                    });
+                                                                }}
+                                                            />
+
+                                                            {/* Required Switch */}
+                                                            <Switch
+                                                                size="sm"
+                                                                colorScheme={excludeMode ? "green" : "yellow"}
+                                                                isChecked={isRequired}
+                                                                onChange={(e) => {
+                                                                    const checked = e.target.checked;
+                                                                    setCurrentTeacher((prev: any) => {
+                                                                        const updated = { ...prev };
+                                                                        const list = new Set(updated.required_teach || []);
+                                                                        if (checked) {
+                                                                            if (!updated.can_teach?.includes(id)) {
+                                                                                updated.can_teach = [...(updated.can_teach || []), id];
+                                                                            }
+                                                                            list.add(id);
+                                                                            const currentOverrides = normalizeOverrides(updated).filter((ov: any) => ov.subject !== id);
+                                                                            currentOverrides.push({ subject: id, excludeextras: true, extratimeblocks: [] });
+                                                                            updated.required_teach_overrides = currentOverrides;
+                                                                        } else {
+                                                                            list.delete(id);
+                                                                            updated.required_teach_overrides = normalizeOverrides(updated).filter((ov: any) => ov.subject !== id);
+                                                                            setExpandedRequiredSubjects((prevOpen) => ({ ...prevOpen, [id]: false }));
+                                                                        }
+                                                                        updated.required_teach = Array.from(list);
+                                                                        return updated;
+                                                                    });
+                                                                }}
+                                                            />
+
+                                                            {isRequired && timeblocks.length > 0 && (
+                                                                <IconButton
+                                                                    aria-label="Toggle required period options"
+                                                                    icon={isExpanded ? <ChevronUpIcon /> : <ChevronDownIcon />}
+                                                                    size="xs"
+                                                                    variant="ghost"
+                                                                    onClick={() => setExpandedRequiredSubjects((prevOpen) => ({ ...prevOpen, [id]: !prevOpen[id] }))}
+                                                                />
+                                                            )}
+                                                        </HStack>
+
+                                                        {isRequired && timeblocks.length > 0 && isExpanded && (
+                                                            <Box mt={2} p={2} borderWidth="1px" borderColor="gray.100" borderRadius="md" bg="gray.50">
+                                                                <HStack justify="space-between" mb={2}>
+                                                                    <Text fontSize="xs" fontWeight="bold">Main Teacher Mode</Text>
+                                                                    <Switch
+                                                                        size="sm"
+                                                                        colorScheme={excludeMode ? "green" : "yellow"}
+                                                                        isChecked={excludeMode}
+                                                                        onChange={(e) => toggleMainTeacher(id, e.target.checked)}
+                                                                    />
+                                                                </HStack>
+                                                                <Text fontSize="2xs" color="gray.600" mb={2}>
+                                                                    Green = include-all-except-unchecked. Yellow = include-only-checked.
+                                                                </Text>
+                                                                <VStack align="stretch" spacing={1} maxH="120px" overflowY="auto">
+                                                                    {timeblocks.map((tb: any, idx: number) => {
+                                                                        const blockId = getTimeblockId(tb);
+                                                                        if (!blockId) return null;
+                                                                        const selected = isTimeblockSelected(currentTeacher, id, blockId);
+                                                                        return (
+                                                                            <Switch
+                                                                                key={`${id}-tb-${blockId}-${idx}`}
+                                                                                size="sm"
+                                                                                colorScheme={excludeMode ? "green" : "yellow"}
+                                                                                isChecked={selected}
+                                                                                onChange={(e) => toggleSubjectTimeblock(id, blockId, e.target.checked)}
+                                                                            >
+                                                                                {tb.start?.day?.slice(0, 3)} {tb.start?.time} - {tb.end?.time}
+                                                                            </Switch>
+                                                                        );
+                                                                    })}
+                                                                </VStack>
+                                                            </Box>
+                                                        )}
+                                                    </Box>
                                                 );
                                             })}
                                     </VStack>

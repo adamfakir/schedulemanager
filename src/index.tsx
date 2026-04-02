@@ -9,11 +9,9 @@ const theme = extendTheme({});
 
 const root = ReactDOM.createRoot(document.getElementById('root')!);
 root.render(
-    <React.StrictMode>
-        <ChakraProvider theme={theme}>
-            <App />
-        </ChakraProvider>
-    </React.StrictMode>
+    <ChakraProvider theme={theme}>
+        <App />
+    </ChakraProvider>
 );
 // If you want to start measuring performance in your app, pass a function
 // to log results (for example: reportWebVitals(console.log))

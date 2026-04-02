@@ -8,7 +8,8 @@ import {Box, Flex, Button, Spacer, Heading, HStack, VStack, Center, Icon, Divide
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { ArrowDownIcon, HamburgerIcon} from '@chakra-ui/icons'
 import { AvailabilityContext } from '../utils/AvailabilityContext';
-import { teacherCacheGlobal, subjectCacheGlobal } from '../utils/globalCache';
+import { teacherCacheGlobal, subjectCacheGlobal, studentCacheGlobal } from '../utils/globalCache';
+import { getStudentsFromCache, getSubjectsFromCache, getTeachersFromCache, loadAllStudents, loadAllSubjects, loadAllTeachers, loadStudentById, loadSubjectById, loadTeacherById } from '../utils/apiClient';
 
 import axios from 'axios';
 import {
@@ -33,9 +34,36 @@ import {
     const [showAllSubjects, setShowAllSubjects] = useState(false);
     const [item, setItem] = useState<any>(null);
     const [allStudents, setAllStudents] = useState<any[]>([]);
+    const [addAvailabilityDay, setAddAvailabilityDay] = useState('Monday');
+    const [addAvailabilityStart, setAddAvailabilityStart] = useState('');
+    const [addAvailabilityEnd, setAddAvailabilityEnd] = useState('');
     const formatTime = (time: string): string => {
         const [h, m] = time.split(":").map(Number);
         return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+    };
+    const toMinutes = (time: string): number => {
+        const [h, m] = time.split(':').map(Number);
+        return h * 60 + m;
+    };
+    const toSubjectId = (raw: any): string => String(raw?.$oid || raw?.subject?.$oid || raw?.subject || raw?.id || raw || '');
+    const getTimeblockId = (tb: any): string => String(tb?.blockid || tb?.id || tb?.timeblockId || '');
+    const isTeacherAssignedForSubject = (teacher: any, subject: any): boolean => {
+        const subjectId = String(subject?._id?.$oid || subject?._id || '');
+        const requiredIds = (teacher?.required_teach || []).map((sid: any) => toSubjectId(sid));
+        if (!requiredIds.includes(subjectId)) return false;
+
+        const override = (teacher?.required_teach_overrides || []).find((ov: any) => toSubjectId(ov?.subject) === subjectId);
+        if (!override) return true;
+
+        const extras = new Set((override?.extratimeblocks || []).map((id: any) => String(id)));
+        if (extras.size === 0) return true;
+
+        const excludeMode = !!override?.excludeextras;
+        return (subject?.timeblocks || []).some((tb: any) => {
+            const tbId = getTimeblockId(tb);
+            if (!tbId) return !excludeMode;
+            return excludeMode ? !extras.has(tbId) : extras.has(tbId);
+        });
     };
     const {
         availability, setAvailability,
@@ -47,19 +75,40 @@ import {
         end:   { day: string; time: string };
     };
     const computeBusyRanges = (availability: TimeBlock[]): TimeBlock[] => {
-        const allDayTimes = ['00:00', '11:59'];
         const busyRanges: TimeBlock[] = [];
 
         const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 
         for (const day of days) {
-            const slots = availability
+            const rawSlots = availability
                 .filter(r => r.start.day === day)
-                .sort((a, b) => a.start.time.localeCompare(b.start.time));
+                .filter(r => toMinutes(r.end.time) > toMinutes(r.start.time))
+                .map(r => ({
+                    start: { ...r.start },
+                    end: { ...r.end },
+                }))
+                .sort((a, b) => toMinutes(a.start.time) - toMinutes(b.start.time));
+
+            const slots: TimeBlock[] = [];
+            rawSlots.forEach((slot) => {
+                if (!slots.length) {
+                    slots.push(slot);
+                    return;
+                }
+
+                const last = slots[slots.length - 1];
+                if (toMinutes(slot.start.time) <= toMinutes(last.end.time)) {
+                    if (toMinutes(slot.end.time) > toMinutes(last.end.time)) {
+                        last.end.time = slot.end.time;
+                    }
+                } else {
+                    slots.push(slot);
+                }
+            });
 
             let current = '00:00';
             for (const slot of slots) {
-                if (slot.start.time > current) {
+                if (toMinutes(slot.start.time) > toMinutes(current)) {
                     busyRanges.push({
                         start: { day, time: current },
                         end:   { day, time: slot.start.time },
@@ -68,7 +117,7 @@ import {
                 current = slot.end.time;
             }
 
-            if (current < '23:59') {
+            if (toMinutes(current) < toMinutes('23:59')) {
                 busyRanges.push({
                     start: { day, time: current },
                     end:   { day, time: '23:59' },
@@ -77,6 +126,40 @@ import {
         }
 
         return busyRanges;
+    };
+    const normalizeAvailability = (ranges: TimeBlock[]): TimeBlock[] => {
+        const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+        const merged: TimeBlock[] = [];
+
+        days.forEach((day) => {
+            const dayRanges = ranges
+                .filter((r) => r.start.day === day && r.end.day === day)
+                .sort((a, b) => toMinutes(a.start.time) - toMinutes(b.start.time));
+
+            dayRanges.forEach((r) => {
+                if (!merged.length || merged[merged.length - 1].start.day !== day) {
+                    merged.push({
+                        start: { day, time: r.start.time },
+                        end: { day, time: r.end.time }
+                    });
+                    return;
+                }
+
+                const last = merged[merged.length - 1];
+                if (toMinutes(r.start.time) <= toMinutes(last.end.time)) {
+                    if (toMinutes(r.end.time) > toMinutes(last.end.time)) {
+                        last.end.time = r.end.time;
+                    }
+                } else {
+                    merged.push({
+                        start: { day, time: r.start.time },
+                        end: { day, time: r.end.time }
+                    });
+                }
+            });
+        });
+
+        return merged;
     };
     const fullWeek = (): TimeBlock[] =>
         ['Monday','Tuesday','Wednesday','Thursday','Friday'].map(d=>({
@@ -94,11 +177,7 @@ import {
                 { headers: { Authorization: token } }
             );
             console.log("✅ Availability saved.");
-            // Refresh teacher cache after update
-            const allRes = await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/all_org_teachers`, {
-                headers: { Authorization: token }
-            });
-            const allTeachers = allRes.data || [];
+            const allTeachers = await loadAllTeachers(token, { force: true, preferCache: false });
             teacherCacheGlobal.current = allTeachers;
             localStorage.setItem('teacherCacheGlobal', JSON.stringify({ data: allTeachers, ts: Date.now() }));
         } catch (err) {
@@ -108,72 +187,45 @@ import {
     useEffect(() => {
         const token = localStorage.getItem('user_token');
         if (!isSchedulePage || !location.pathname.startsWith('/schedule/')) return;
+        if (!token) return;
+
         const id = location.pathname.split('/schedule/')[1];
         setScheduleId(id);
-        const CACHE_TTL = 60 * 60 * 1000; // 1 hour
-        const now = Date.now();
-        // Helper to get/set cache with timestamp
-        const getCache = (key: string) => {
-            const raw = localStorage.getItem(key);
-            if (!raw) return null;
-            try {
-                const { data, ts } = JSON.parse(raw);
-                if (now - ts < CACHE_TTL) return data;
-            } catch {}
-            return null;
-        };
-        const setCache = (key: string, data: any) => {
-            localStorage.setItem(key, JSON.stringify({ data, ts: now }));
-        };
+
+        let active = true;
+
         const fetchTypeAndSubjects = async () => {
-            let subjCache = getCache('subjectCacheGlobal');
-            let teacherCache = getCache('teacherCacheGlobal');
-            let studentCache = getCache('studentCacheGlobal');
-            // Fetch all in parallel if needed
-            const fetches = [];
-            if (!subjCache) fetches.push(
-                axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/subject/all_org_subjects`, { headers: { Authorization: token! } })
-            );
-            if (!teacherCache) fetches.push(
-                axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/all_org_teachers`, { headers: { Authorization: token! } })
-            );
-            if (!studentCache) fetches.push(
-                axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/student/all_org_students`, { headers: { Authorization: token! } })
-            );
-            let fetchIdx = 0;
-            if (!subjCache) {
-                const res = await fetches[fetchIdx++];
-                subjCache = res.data || [];
-                setCache('subjectCacheGlobal', subjCache);
-            }
-            if (!teacherCache) {
-                const res = await fetches[fetchIdx++];
-                teacherCache = res.data || [];
-                setCache('teacherCacheGlobal', teacherCache);
-            }
-            if (!studentCache) {
-                const res = await fetches[fetchIdx++];
-                studentCache = res.data || [];
-                setCache('studentCacheGlobal', studentCache);
-            }
-            subjectCacheGlobal.current = subjCache;
-            teacherCacheGlobal.current = teacherCache;
-            // Student/teacher fetch logic
-            try {
-                const res = await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/student/${id}`, {
-                    headers: { Authorization: token! },
-                });
+            const cachedSubjects = getSubjectsFromCache() || [];
+            const cachedTeachers = getTeachersFromCache() || [];
+            const cachedStudents = getStudentsFromCache() || [];
+
+            subjectCacheGlobal.current = cachedSubjects;
+            teacherCacheGlobal.current = cachedTeachers;
+            studentCacheGlobal.current = cachedStudents;
+
+            if (active && cachedStudents.length) setAllStudents(cachedStudents);
+
+            const subjectsPromise = loadAllSubjects(token, { preferCache: false });
+            const teachersPromise = loadAllTeachers(token, { preferCache: false });
+            const studentsPromise = loadAllStudents(token, { preferCache: false });
+
+            const studentData = await loadStudentById(token, id, { allow404: true });
+            if (studentData) {
+                if (!active) return;
                 setScheduleType("Student");
-                setItem(res.data);
-                setAllStudents(studentCache || []);
-                // Attach teacher names
-                const enrichedSubjects = (subjCache || []).map((subject: any) => {
-                    const requiredTeacherNames = (teacherCache || [])
-                        .filter((t: any) =>
-                            (t.required_teach || []).some((sid: any) =>
-                                (sid.$oid || sid) === (subject._id?.$oid || subject._id)
-                            )
-                        )
+                setItem(studentData);
+
+                const [subjectsList, teachersList, studentsList] = await Promise.all([
+                    subjectsPromise,
+                    teachersPromise,
+                    studentsPromise,
+                ]);
+                if (!active) return;
+
+                setAllStudents(studentsList || []);
+                const enrichedSubjects = (subjectsList || []).map((subject: any) => {
+                    const requiredTeacherNames = (teachersList || [])
+                        .filter((t: any) => isTeacherAssignedForSubject(t, subject))
                         .map((t: any) => ({
                             name: t.displayname || t.name,
                             id: t._id?.$oid || t._id
@@ -181,60 +233,42 @@ import {
                     return { ...subject, teachers: requiredTeacherNames };
                 });
                 setSubjects(enrichedSubjects);
-            } catch {
-                try {
-                    const teacherRes = await axios.get(
-                        `https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/${id}`,
-                        { headers: { Authorization: token! } }
-                    );
-                    const teacherData = { ...teacherRes.data, type: "Teacher" };
-                    setItem(teacherData);
-                    setScheduleType("Teacher");
-                    setAvailability(teacherData.availability || []);
-                    setAllStudents(studentCache || []);
-                    setSubjects(subjCache || []);
-                } catch {
-                    try {
-                        await axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/subject/${id}`, {
-                            headers: { Authorization: token! },
-                        });
-                        setScheduleType("Subject");
-                    } catch {
-                        setScheduleType(null);
-                    }
-                }
+                return;
             }
+
+            const teacherDataRaw = await loadTeacherById(token, id, { allow404: true });
+            if (teacherDataRaw) {
+                if (!active) return;
+                const teacherData = { ...teacherDataRaw, type: "Teacher" };
+                setItem(teacherData);
+                setScheduleType("Teacher");
+                setAvailability(teacherData.availability || []);
+
+                const [subjectsList, studentsList] = await Promise.all([
+                    subjectsPromise,
+                    studentsPromise,
+                ]);
+                if (!active) return;
+                setAllStudents(studentsList || []);
+                setSubjects(subjectsList || []);
+                return;
+            }
+
+            const subjectData = await loadSubjectById(token, id, { allow404: true });
+            if (!active) return;
+            setScheduleType(subjectData ? "Subject" : null);
         };
+
         fetchTypeAndSubjects();
-        // Background cache refresher
-        let interval: NodeJS.Timeout | undefined;
-        if (token) {
-            interval = setInterval(async () => {
-                try {
-                    const [subjRes, teacherRes, studentRes] = await Promise.all([
-                        axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/subject/all_org_subjects`, { headers: { Authorization: token } }),
-                        axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/teacher/all_org_teachers`, { headers: { Authorization: token } }),
-                        axios.get(`https://schedulebackendapi-3an8u.ondigitalocean.app/student/all_org_students`, { headers: { Authorization: token } })
-                    ]);
-                    const subjData = subjRes.data || [];
-                    const teacherData = teacherRes.data || [];
-                    const studentData = studentRes.data || [];
-                    setCache('subjectCacheGlobal', subjData);
-                    setCache('teacherCacheGlobal', teacherData);
-                    setCache('studentCacheGlobal', studentData);
-                    subjectCacheGlobal.current = subjData;
-                    teacherCacheGlobal.current = teacherData;
-                } catch (err) {
-                    // ignore
-                }
-            }, 30000); // every 30 seconds
-        }
+
         const pinned = localStorage.getItem('pinned_subject_ids');
         if (pinned) {
             setPinnedSubjectIds(JSON.parse(pinned));
         }
-        // Cleanup
-        return () => { if (interval) clearInterval(interval); };
+
+        return () => {
+            active = false;
+        };
     }, [location]);
     const handleLogout = () => {
         localStorage.removeItem('user_token');
@@ -628,7 +662,11 @@ import {
                                                 <VStack align="start" spacing={3}>
                                                     <Box w="100%">
                                                         <Text fontSize="sm" fontWeight="bold" mb={1}>Day</Text>
-                                                        <select id="add-day" style={{ width: "100%", padding: "6px", borderRadius: "4px" }}>
+                                                        <select
+                                                            value={addAvailabilityDay}
+                                                            onChange={(e) => setAddAvailabilityDay(e.target.value)}
+                                                            style={{ width: "100%", padding: "6px", borderRadius: "4px" }}
+                                                        >
                                                             {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"].map(d => (
                                                                 <option key={d}>{d}</option>
                                                             ))}
@@ -637,12 +675,24 @@ import {
 
                                                     <Box w="100%">
                                                         <Text fontSize="sm" fontWeight="bold" mb={1}>Start Time</Text>
-                                                        <Input id="add-start" type="time" size="sm" width="100%" />
+                                                        <Input
+                                                            type="time"
+                                                            size="sm"
+                                                            width="100%"
+                                                            value={addAvailabilityStart}
+                                                            onChange={(e) => setAddAvailabilityStart(e.target.value)}
+                                                        />
                                                     </Box>
 
                                                     <Box w="100%">
                                                         <Text fontSize="sm" fontWeight="bold" mb={1}>End Time</Text>
-                                                        <Input id="add-end" type="time" size="sm" width="100%" />
+                                                        <Input
+                                                            type="time"
+                                                            size="sm"
+                                                            width="100%"
+                                                            value={addAvailabilityEnd}
+                                                            onChange={(e) => setAddAvailabilityEnd(e.target.value)}
+                                                        />
                                                     </Box>
 
                                                     <Button
@@ -650,15 +700,16 @@ import {
                                                         colorScheme="blue"
                                                         alignSelf="start"
                                                         onClick={() => {
-                                                            const day = (document.getElementById("add-day") as HTMLSelectElement).value;
-                                                            const start = (document.getElementById("add-start") as HTMLInputElement).value;
-                                                            const end = (document.getElementById("add-end") as HTMLInputElement).value;
+                                                            const day = addAvailabilityDay;
+                                                            const start = addAvailabilityStart;
+                                                            const end = addAvailabilityEnd;
                                                             if (!start || !end || !day) return;
+                                                            if (toMinutes(end) <= toMinutes(start)) return;
 
                                                             const newRange = { start: { day, time: start }, end: { day, time: end } };
 
                                                             if (mode === "available") {
-                                                                const updated = [...availability, newRange];
+                                                                const updated = normalizeAvailability([...availability, newRange]);
                                                                 setAvailability(updated);
                                                                 saveAvailability(updated);
                                                             } else if (mode === "busy") {
@@ -677,13 +728,10 @@ import {
                                                                     return parts;
                                                                 });
 
-                                                                setAvailability(updated);
-                                                                saveAvailability(updated);
+                                                                const normalized = normalizeAvailability(updated);
+                                                                setAvailability(normalized);
+                                                                saveAvailability(normalized);
                                                             }
-
-                                                            // Clear inputs
-                                                            (document.getElementById("add-start") as HTMLInputElement).value = '';
-                                                            (document.getElementById("add-end") as HTMLInputElement).value = '';
                                                         }}
                                                     >
                                                         ➕ Add Time Range

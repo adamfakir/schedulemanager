@@ -32,7 +32,7 @@ import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteI
 import {FaThumbtack} from "react-icons/fa";
 import { useNavigate, Link } from 'react-router-dom';
 import { usePageTitle } from '../utils/usePageTitle';
-const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app";
+import { API_BASE, getSubjectsFromCache, loadAllSubjects, loadUserSelf } from '../utils/apiClient';
 
 interface User {
     full_name: string;
@@ -163,12 +163,23 @@ function Subjects() {
             return;
         }
 
-        axios.get(`${API_BASE}/user/get_self`, {
-            headers: {Authorization: token},
-            withCredentials: true,
-        })
-            .then((res) => {
-                setUser(res.data);
+        const cachedSubjects = getSubjectsFromCache();
+        if (cachedSubjects) {
+            setSubjects(cachedSubjects);
+            setFilteredSubjects(cachedSubjects);
+            const tags = new Set<string>();
+            cachedSubjects.forEach((subject: { tags: string[]; }) => {
+                subject.tags?.forEach((tag: string) => tags.add(tag));
+            });
+            const tagArray = Array.from(tags);
+            setAvailableTags(tagArray);
+            setSelectedTags(tagArray);
+            setSubjectsLoading(false);
+        }
+
+        loadUserSelf(token)
+            .then((data) => {
+                setUser(data);
             })
             .catch((err) => {
                 console.error('Failed to fetch user', err);
@@ -176,12 +187,9 @@ function Subjects() {
             .finally(() => {
                 setLoading(false);
             });
-        axios.get(`${API_BASE}/subject/all_org_subjects`, {
-            headers: {Authorization: token},
-            withCredentials: true,
-        })
-            .then(res => {
-                const data = res.data;
+
+        loadAllSubjects(token, { preferCache: false })
+            .then((data) => {
                 setSubjects(data);
                 setFilteredSubjects(data);
 
@@ -194,7 +202,7 @@ function Subjects() {
                 setAvailableTags(tagArray);
                 setSelectedTags(tagArray);
             })
-            .catch(err => {
+            .catch((err) => {
                 console.error("Failed to load subjects", err);
             })
             .finally(() => {
@@ -231,7 +239,7 @@ function Subjects() {
         });
 
         setFilteredSubjects(results);
-    }, [searchTerm, sortOrder, selectedTags]);
+    }, [subjects, availableTags, searchTerm, sortOrder, selectedTags]);
     if (loading || subjectsLoading) {
         return (
             <Center h="100vh">
@@ -277,7 +285,8 @@ function Subjects() {
                         startday: tb.start.day,
                         starttime: tb.start.time,
                         endday: tb.end.day,
-                        endtime: tb.end.time
+                        endtime: tb.end.time,
+                        blockid: tb.blockid || tb.id || tb.timeblockId,
                     };
                 }
                 return tb;
