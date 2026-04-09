@@ -884,7 +884,7 @@ function Subjects() {
                                             const editedId = currentSubject?._id;
                                             const merged = subjects.map(s => (s._id === editedId ? currentSubject : s));
                                             const sorted = [...merged].sort((a, b) => b.weight - a.weight);
-                                            const elements: JSX.Element[] = [];
+                                            const elements: React.ReactElement[] = [];
 
                                             let inserted = false;
 
