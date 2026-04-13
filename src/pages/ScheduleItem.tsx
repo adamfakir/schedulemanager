@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useContext, useMemo } from 'react';
+import React, { useEffect, useLayoutEffect, useState, useContext, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { keyframes } from '@emotion/react';
 import { Box, Heading, Spinner, Center, VStack, Button, HStack, Checkbox, Input, FormControl, FormLabel, Text, Alert, Textarea } from '@chakra-ui/react';
@@ -186,6 +186,90 @@ const getBlockKey = (block: any): string =>
 const parseIdList = (raw: string): string[] =>
     Array.from(new Set(raw.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean)));
 
+/** When enabled, scales all cell text until it fits inside the grid cell. When disabled, children render unchanged. */
+function ScaleToFitCell({
+    enabled,
+    contentKey,
+    children,
+}: {
+    enabled: boolean;
+    contentKey: string;
+    children: React.ReactNode;
+}) {
+    const containerRef = useRef<HTMLDivElement>(null);
+    const contentRef = useRef<HTMLDivElement>(null);
+    const [scale, setScale] = useState(1);
+
+    useLayoutEffect(() => {
+        if (!enabled) {
+            setScale(1);
+            return;
+        }
+        const el = containerRef.current;
+        const inner = contentRef.current;
+        if (!el || !inner) return;
+
+        const measure = () => {
+            // Match rendered transform so layout during measure is accurate.
+            inner.style.transform = 'translateY(-50%) scale(1)';
+            void inner.offsetHeight;
+            const cw = el.clientWidth;
+            const ch = el.clientHeight;
+            if (cw <= 0 || ch <= 0) return;
+            const sw = inner.scrollWidth;
+            const sh = inner.scrollHeight;
+            if (sw <= 0 && sh <= 0) return;
+            const sx = sw > 0 ? cw / sw : 1;
+            const sy = sh > 0 ? ch / sh : 1;
+            const s = Math.min(1, sx, sy);
+            inner.style.removeProperty('transform');
+            setScale(Number.isFinite(s) && s > 0 ? s : 1);
+        };
+
+        measure();
+        const ro = new ResizeObserver(() => {
+            requestAnimationFrame(measure);
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, [enabled, contentKey]);
+
+    if (!enabled) {
+        return <>{children}</>;
+    }
+
+    return (
+        <Box
+            ref={containerRef}
+            position="relative"
+            flex={1}
+            alignSelf="stretch"
+            w="100%"
+            minH={0}
+            minW={0}
+            overflow="hidden"
+        >
+            <Box
+                ref={contentRef}
+                position="absolute"
+                left={0}
+                right={0}
+                top="50%"
+                w="100%"
+                maxW="100%"
+                boxSizing="border-box"
+                sx={{
+                    // Full cell width so text wraps at the column edge, not shrink-to-fit narrow.
+                    transform: `translateY(-50%) scale(${scale})`,
+                    transformOrigin: 'center center',
+                }}
+            >
+                {children}
+            </Box>
+        </Box>
+    );
+}
+
 function ScheduleItem() {
     // Helper: do PUT first, then in background refresh cache (GET). Down arrow = PUT, up arrow = GET.
     const executePutWithSaving = async (putFn: () => Promise<void>, getSubjectIdsAfter?: string | string[]) => {
@@ -233,6 +317,7 @@ function ScheduleItem() {
     const teacherCacheRef = useRef<any[] | null>(null);
     const [showEndTime, setShowEndTime] = useState<boolean>(false);
     const [hideTeacherNames, setHideTeacherNames] = useState<boolean>(false);
+    const [scaleTextToFitCell, setScaleTextToFitCell] = useState<boolean>(false);
     const [refreshTrigger, setRefreshTrigger] = useState(0);
     const [advancedOrigStart, setAdvancedOrigStart] = useState('');
     const [advancedOrigEnd, setAdvancedOrigEnd] = useState('');
@@ -1034,6 +1119,7 @@ function ScheduleItem() {
         if (typeof payload.advancedNewEnd === 'string') setAdvancedNewEnd(payload.advancedNewEnd);
         if (typeof payload.showEndTime === 'boolean') setShowEndTime(payload.showEndTime);
         if (typeof payload.hideTeacherNames === 'boolean') setHideTeacherNames(payload.hideTeacherNames);
+        if (typeof payload.scaleTextToFitCell === 'boolean') setScaleTextToFitCell(payload.scaleTextToFitCell);
         if (payload.hiddenDays && typeof payload.hiddenDays === 'object') {
             setHiddenDays((prev) => ({ ...prev, ...payload.hiddenDays }));
         }
@@ -1067,6 +1153,7 @@ function ScheduleItem() {
         appliedTeacherIds,
         showEndTime,
         hideTeacherNames,
+        scaleTextToFitCell,
     });
 
     const handleCopySettings = async () => {
@@ -1962,6 +2049,13 @@ function ScheduleItem() {
                             Hide Teacher Names
                         </Checkbox>
                     )}
+                    <Checkbox
+                        isChecked={scaleTextToFitCell}
+                        onChange={(e) => setScaleTextToFitCell(e.target.checked)}
+                        colorScheme="blue"
+                    >
+                        Scale-to-fit in cell
+                    </Checkbox>
                     <Button
                         leftIcon={<DownloadIcon />}
                         colorScheme="green"
@@ -2303,11 +2397,16 @@ function ScheduleItem() {
                                             <Box flex={1} bg={swapReplaceHover.side === 'replace' ? 'red.300' : 'red.100'} display="flex" alignItems="center" justifyContent="center" fontWeight="bold" fontSize="sm" color="white" textShadow="1px 1px 2px rgba(0,0,0,0.8)">REPLACE</Box>
                                         </Box>
                                     )}
-                                    <VStack spacing={0} pointerEvents="none" w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
-                                        <Box>{cropSemesterTag(block.name)}</Box>
-                                        {item.type === "Teacher" && block.displayclass && <Box fontWeight="normal" fontSize="sm">{cropSemesterTag(block.displayclass)}</Box>}
-                                        {item.type === "Student" && !hideTeacherNames && block.teachers?.length > 0 && <Box fontWeight="normal" fontSize="sm">{block.teachers.map((t: string, idx: number) => cropSemesterTag(t)).join(", ")}</Box>}
-                                    </VStack>
+                                    <ScaleToFitCell
+                                        enabled={scaleTextToFitCell}
+                                        contentKey={`${getBlockKey(block)}|${hideTeacherNames}|solo`}
+                                    >
+                                        <VStack spacing={0} pointerEvents="none" w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
+                                            <Box>{cropSemesterTag(block.name)}</Box>
+                                            {item.type === "Teacher" && block.displayclass && <Box fontWeight="normal" fontSize="sm">{cropSemesterTag(block.displayclass)}</Box>}
+                                            {item.type === "Student" && !hideTeacherNames && block.teachers?.length > 0 && <Box fontWeight="normal" fontSize="sm">{block.teachers.map((t: string, idx: number) => cropSemesterTag(t)).join(", ")}</Box>}
+                                        </VStack>
+                                    </ScaleToFitCell>
                                 </Box>
                             );
                         };
@@ -2416,11 +2515,16 @@ function ScheduleItem() {
                                                             <Box flex={1} bg={swapReplaceHover.side === 'replace' ? 'red.300' : 'red.100'} display="flex" alignItems="center" justifyContent="center" fontWeight="bold" fontSize="xs" color="white" textShadow="1px 1px 2px rgba(0,0,0,0.8)">REPLACE</Box>
                                                         </Box>
                                                     )}
-                                                    <VStack spacing={0} pointerEvents="none" w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
-                                                        <Box>{cropSemesterTag(overlapBlock.name)}</Box>
-                                                        {item.type === "Teacher" && overlapBlock.displayclass && <Box fontWeight="normal" fontSize="xs">{cropSemesterTag(overlapBlock.displayclass)}</Box>}
-                                                        {item.type === "Student" && !hideTeacherNames && overlapBlock.teachers?.length > 0 && <Box fontWeight="normal" fontSize="xs">{overlapBlock.teachers.map((t: string, idx: number) => cropSemesterTag(t)).join(", ")}</Box>}
-                                                    </VStack>
+                                                    <ScaleToFitCell
+                                                        enabled={scaleTextToFitCell}
+                                                        contentKey={`${getBlockKey(overlapBlock)}|${hideTeacherNames}|overlap|${blockIdx}`}
+                                                    >
+                                                        <VStack spacing={0} pointerEvents="none" w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
+                                                            <Box>{cropSemesterTag(overlapBlock.name)}</Box>
+                                                            {item.type === "Teacher" && overlapBlock.displayclass && <Box fontWeight="normal" fontSize="xs">{cropSemesterTag(overlapBlock.displayclass)}</Box>}
+                                                            {item.type === "Student" && !hideTeacherNames && overlapBlock.teachers?.length > 0 && <Box fontWeight="normal" fontSize="xs">{overlapBlock.teachers.map((t: string, idx: number) => cropSemesterTag(t)).join(", ")}</Box>}
+                                                        </VStack>
+                                                    </ScaleToFitCell>
                                                 </Box>
                                             );
                                         })}
@@ -2588,17 +2692,22 @@ function ScheduleItem() {
                                 </Box>
                             )}
 
-                            <VStack spacing={0} pointerEvents="none" w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
-                                <Box>{cropSemesterTag(block.name)}</Box>
-                                {item.type === "Teacher" && block.displayclass && (
-                                    <Box fontWeight="normal" fontSize="sm">{cropSemesterTag(block.displayclass)}</Box>
-                                )}
-                                {item.type === "Student" && !hideTeacherNames && block.teachers?.length > 0 && (
-                                    <Box fontWeight="normal" fontSize="sm">
-                                        {block.teachers.map((t: string, idx: number) => cropSemesterTag(t)).join(", ")}
-                                    </Box>
-                                )}
-                            </VStack>
+                            <ScaleToFitCell
+                                enabled={scaleTextToFitCell}
+                                contentKey={`${getBlockKey(block)}|${hideTeacherNames}|main`}
+                            >
+                                <VStack spacing={0} pointerEvents="none" w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
+                                    <Box>{cropSemesterTag(block.name)}</Box>
+                                    {item.type === "Teacher" && block.displayclass && (
+                                        <Box fontWeight="normal" fontSize="sm">{cropSemesterTag(block.displayclass)}</Box>
+                                    )}
+                                    {item.type === "Student" && !hideTeacherNames && block.teachers?.length > 0 && (
+                                        <Box fontWeight="normal" fontSize="sm">
+                                            {block.teachers.map((t: string, idx: number) => cropSemesterTag(t)).join(", ")}
+                                        </Box>
+                                    )}
+                                </VStack>
+                            </ScaleToFitCell>
 
                             {/* ⬇️ Bottom Resize Handle */}
                             {/*<Box*/}
