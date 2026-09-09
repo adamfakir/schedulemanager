@@ -242,6 +242,7 @@ function ScaleToFitCell({
         <Box
             ref={containerRef}
             position="relative"
+            pointerEvents="none"
             flex={1}
             alignSelf="stretch"
             w="100%"
@@ -252,6 +253,7 @@ function ScaleToFitCell({
             <Box
                 ref={contentRef}
                 position="absolute"
+                pointerEvents="none"
                 left={0}
                 right={0}
                 top="50%"
@@ -2348,7 +2350,9 @@ function ScheduleItem() {
                                     position="relative"
                                     onDragStart={(e) => {
                                         if (resizing) { e.preventDefault(); return; }
+                                        e.dataTransfer.effectAllowed = "move";
                                         e.dataTransfer.setData("existing_block_index", i.toString());
+                                        e.dataTransfer.setData("text/plain", i.toString());
                                         setDraggedSubjectId(block.subjectId);
                                         setDraggedSubjectData(block);
                                         setHoverSubject(block);
@@ -2470,7 +2474,9 @@ function ScheduleItem() {
                                                     onDoubleClick={(e) => { e.stopPropagation(); openEditingBlock(originalBlockIndex, overlapBlock.start.time, overlapBlock.end.time); }}
                                                     onDragStart={(e) => {
                                                         if (resizing) { e.preventDefault(); return; }
+                                                        e.dataTransfer.effectAllowed = "move";
                                                         e.dataTransfer.setData("existing_block_index", originalBlockIndex.toString());
+                                                        e.dataTransfer.setData("text/plain", originalBlockIndex.toString());
                                                         setDraggedSubjectId(overlapBlock.subjectId);
                                                         setDraggedSubjectData(overlapBlock);
                                                         setHoverSubject(overlapBlock);
@@ -2564,7 +2570,9 @@ function ScheduleItem() {
                             position="relative" // ✅ needed for the handles to position correctly
                             onDragStart={(e) => {
                                 if (resizing) { e.preventDefault(); return; }
+                                e.dataTransfer.effectAllowed = "move";
                                 e.dataTransfer.setData("existing_block_index", i.toString());
+                                e.dataTransfer.setData("text/plain", i.toString());
                                 setDraggedSubjectId(block.subjectId);
                                 setDraggedSubjectData(block);
                                 setHoverSubject(block);
@@ -3594,6 +3602,5 @@ function ScheduleItem() {
 }
 
 export default ScheduleItem;
-
 
 
