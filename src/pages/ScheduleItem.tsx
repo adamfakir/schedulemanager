@@ -458,6 +458,34 @@ function ScheduleItem() {
         setDraggedTeacherBusy(busy);
     };
 
+    const startExistingBlockDrag = (
+        e: React.DragEvent<HTMLElement>,
+        blockIndex: number,
+        block: any
+    ) => {
+        if (resizing) {
+            e.preventDefault();
+            return;
+        }
+
+        // Safari can cancel an HTML drag if React re-renders the source element
+        // while the browser is still establishing the drag session. Populate the
+        // DataTransfer synchronously, then defer UI/cache state until the next frame.
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("existing_block_index", blockIndex.toString());
+        e.dataTransfer.setData("text/plain", blockIndex.toString());
+
+        requestAnimationFrame(() => {
+            setDraggedSubjectId(block.subjectId);
+            setDraggedSubjectData(block);
+            setHoverSubject(block);
+            setDraggedBlockIndex(blockIndex);
+            if (item?.type === "Student" && block.teachers?.length) {
+                fetchTeacherBusyRanges(block);
+            }
+        });
+    };
+
     const fetchOverlappingTeacherSchedules = async (subject: any) => {
         if (item?.type !== "Student" || !subject.teachers?.length) {
             setOverlappingTeacherSchedules([]);
@@ -766,40 +794,55 @@ function ScheduleItem() {
             blocks: any[];
         }[] = [];
 
-        for (let i = 0; i < timeblocks.length; i++) {
-            for (let j = i + 1; j < timeblocks.length; j++) {
-                const a = timeblocks[i];
-                const b = timeblocks[j];
+        const canShareOverlap = (a: any, b: any) => {
+            const sameDisplay = a.displayclass && b.displayclass && a.displayclass === b.displayclass;
+            const sameSubject = a.subjectId === b.subjectId;
+            return !(sameSubject && (sameDisplay || !a.displayclass || !b.displayclass));
+        };
 
-                if (hiddenDays[a.start.day] || hiddenDays[b.start.day]) continue;
-                if (hiddenPeriodKeys[getBlockKey(a)] || hiddenPeriodKeys[getBlockKey(b)]) continue;
+        visibleDays.forEach(day => {
+            const dayBlocks = timeblocks.filter((block: any) =>
+                block.start.day === day &&
+                !hiddenPeriodKeys[getBlockKey(block)]
+            );
+            const boundaries = Array.from(new Set(
+                dayBlocks.flatMap((block: any) => [
+                    timeToMinutes(block.start.time),
+                    timeToMinutes(block.end.time),
+                ])
+            )).sort((a, b) => a - b);
 
-                if (a.start.day !== b.start.day) continue;
+            for (let boundaryIndex = 0; boundaryIndex < boundaries.length - 1; boundaryIndex++) {
+                const start = boundaries[boundaryIndex];
+                const end = boundaries[boundaryIndex + 1];
+                const active = dayBlocks.filter((block: any) =>
+                    timeToMinutes(block.start.time) < end &&
+                    timeToMinutes(block.end.time) > start
+                );
+                const overlapping = active.filter((block: any) =>
+                    active.some((other: any) => other !== block && canShareOverlap(block, other))
+                );
+                if (overlapping.length < 2) continue;
 
-                // ⛔ Skip if same block (same subject & displayclass)
-                const sameDisplay = a.displayclass && b.displayclass && a.displayclass === b.displayclass;
-                const sameSubject = a.subjectId === b.subjectId;
+                const previous = overlaps[overlaps.length - 1];
+                const sameBlocks = previous &&
+                    previous.day === day &&
+                    previous.end === minutesToTime(start) &&
+                    previous.blocks.length === overlapping.length &&
+                    previous.blocks.every((block, index) => block === overlapping[index]);
 
-                if (sameSubject && (sameDisplay || !a.displayclass || !b.displayclass)) continue;
-
-                const startA = timeToMinutes(a.start.time);
-                const endA = timeToMinutes(a.end.time);
-                const startB = timeToMinutes(b.start.time);
-                const endB = timeToMinutes(b.end.time);
-
-                const latestStart = Math.max(startA, startB);
-                const earliestEnd = Math.min(endA, endB);
-
-                if (latestStart < earliestEnd) {
+                if (sameBlocks) {
+                    previous.end = minutesToTime(end);
+                } else {
                     overlaps.push({
-                        day: a.start.day,
-                        start: minutesToTime(latestStart),
-                        end: minutesToTime(earliestEnd),
-                        blocks: [a, b],
+                        day,
+                        start: minutesToTime(start),
+                        end: minutesToTime(end),
+                        blocks: overlapping,
                     });
                 }
             }
-        }
+        });
 
         return overlaps;
     };
@@ -2348,17 +2391,10 @@ function ScheduleItem() {
                                     }}
                                     draggable={!resizing}
                                     position="relative"
-                                    onDragStart={(e) => {
-                                        if (resizing) { e.preventDefault(); return; }
-                                        e.dataTransfer.effectAllowed = "move";
-                                        e.dataTransfer.setData("existing_block_index", i.toString());
-                                        e.dataTransfer.setData("text/plain", i.toString());
-                                        setDraggedSubjectId(block.subjectId);
-                                        setDraggedSubjectData(block);
-                                        setHoverSubject(block);
-                                        setDraggedBlockIndex(i);
-                                        if (item?.type === "Student" && block.teachers?.length) fetchTeacherBusyRanges(block);
-                                    }}
+                                    cursor={resizing ? "default" : "grab"}
+                                    userSelect="none"
+                                    sx={{ WebkitUserDrag: resizing ? "none" : "element" }}
+                                    onDragStart={(e) => startExistingBlockDrag(e, i, block)}
                                     onDragOver={(e) => {
                                         e.preventDefault(); e.stopPropagation();
                                         setShiftHeld(e.shiftKey); setCmdHeld(e.metaKey);
@@ -2450,7 +2486,7 @@ function ScheduleItem() {
                                 >
                                     <Box display="flex" height="100%">
                                         {overlap.blocks.map((overlapBlock: any, blockIdx: number) => {
-                                            const originalBlockIndex = timeblocks.findIndex(tb => tb.start.day === overlapBlock.start.day && tb.start.time === overlapBlock.start.time && tb.end.time === overlapBlock.end.time && tb.subjectId === overlapBlock.subjectId);
+                                            const originalBlockIndex = timeblocks.indexOf(overlapBlock);
                                             const isSelected = selectedBlockIndex === originalBlockIndex;
                                             return (
                                                 <Box
@@ -2468,21 +2504,13 @@ function ScheduleItem() {
                                                     border={isSelected ? "3px solid blue" : blockIdx > 0 ? "1px solid white" : "none"}
                                                     borderLeft={blockIdx > 0 ? "2px solid white" : "none"}
                                                     position="relative"
-                                                    cursor="pointer"
+                                                    cursor={resizing ? "default" : "grab"}
                                                     draggable={!resizing}
+                                                    userSelect="none"
+                                                    sx={{ WebkitUserDrag: resizing ? "none" : "element" }}
                                                     onClick={(e) => { e.stopPropagation(); setSelectedBlockIndex(originalBlockIndex); }}
                                                     onDoubleClick={(e) => { e.stopPropagation(); openEditingBlock(originalBlockIndex, overlapBlock.start.time, overlapBlock.end.time); }}
-                                                    onDragStart={(e) => {
-                                                        if (resizing) { e.preventDefault(); return; }
-                                                        e.dataTransfer.effectAllowed = "move";
-                                                        e.dataTransfer.setData("existing_block_index", originalBlockIndex.toString());
-                                                        e.dataTransfer.setData("text/plain", originalBlockIndex.toString());
-                                                        setDraggedSubjectId(overlapBlock.subjectId);
-                                                        setDraggedSubjectData(overlapBlock);
-                                                        setHoverSubject(overlapBlock);
-                                                        setDraggedBlockIndex(originalBlockIndex);
-                                                        if (item?.type === "Student" && overlapBlock.teachers?.length) fetchTeacherBusyRanges(overlapBlock);
-                                                    }}
+                                                    onDragStart={(e) => startExistingBlockDrag(e, originalBlockIndex, overlapBlock)}
                                                     onDragOver={(e) => {
                                                         e.preventDefault(); e.stopPropagation();
                                                         setShiftHeld(e.shiftKey); setCmdHeld(e.metaKey);
@@ -2568,20 +2596,10 @@ function ScheduleItem() {
                             }}
                             draggable={!resizing}
                             position="relative" // ✅ needed for the handles to position correctly
-                            onDragStart={(e) => {
-                                if (resizing) { e.preventDefault(); return; }
-                                e.dataTransfer.effectAllowed = "move";
-                                e.dataTransfer.setData("existing_block_index", i.toString());
-                                e.dataTransfer.setData("text/plain", i.toString());
-                                setDraggedSubjectId(block.subjectId);
-                                setDraggedSubjectData(block);
-                                setHoverSubject(block);
-                                setDraggedBlockIndex(i);
-                                // Show teacher busy preview immediately if dragging a subject as a student
-                                if (item?.type === "Student" && block.teachers?.length) {
-                                    fetchTeacherBusyRanges(block);
-                                }
-                            }}
+                            cursor={resizing ? "default" : "grab"}
+                            userSelect="none"
+                            sx={{ WebkitUserDrag: resizing ? "none" : "element" }}
+                            onDragStart={(e) => startExistingBlockDrag(e, i, block)}
                             onDragOver={(e) => {
                                 e.preventDefault();
                                 e.stopPropagation();
@@ -3602,5 +3620,3 @@ function ScheduleItem() {
 }
 
 export default ScheduleItem;
-
-
