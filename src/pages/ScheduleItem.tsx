@@ -186,6 +186,47 @@ const getBlockKey = (block: any): string =>
 const parseIdList = (raw: string): string[] =>
     Array.from(new Set(raw.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean)));
 
+const SCHEDULE_WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'] as const;
+
+/**
+ * Peak daily minutes if period durations were spread as evenly as possible across `dayCount`
+ * days (longest-processing-time-first). Periods are treated as unsplittable, so e.g. 6 equal
+ * periods → peak of 2 periods/day is "balanced" and should not flag.
+ */
+const balancedPeakDailyMinutes = (durations: number[], dayCount = 5): number => {
+    if (!durations.length) return 0;
+    const bins = Array.from({ length: dayCount }, () => 0);
+    [...durations]
+        .sort((a, b) => b - a)
+        .forEach((d) => {
+            let minIdx = 0;
+            for (let i = 1; i < dayCount; i++) {
+                if (bins[i] < bins[minIdx]) minIdx = i;
+            }
+            bins[minIdx] += d;
+        });
+    return Math.max(...bins);
+};
+
+const teacherLoadHeavyHighlightStyles = {
+    boxShadow: 'inset 0 0 0 4px #ea580c, inset 0 0 36px rgba(234, 88, 12, 0.55)',
+    outline: '2px solid #c2410c',
+    outlineOffset: '-2px' as const,
+};
+
+const teacherLoadSoftHighlightStyles = {
+    boxShadow: 'inset 0 0 0 3px #eab308, inset 0 0 28px rgba(250, 204, 21, 0.42)',
+    outline: '2px solid #ca8a04',
+    outlineOffset: '-2px' as const,
+};
+
+type TeacherLoadStat = {
+    name: string;
+    overloadedDays: string[];
+    overloadedBlockKeys: Set<string>;
+    allBlockKeys: Set<string>;
+};
+
 /** When enabled, scales all cell text until it fits inside the grid cell. When disabled, children render unchanged. */
 function ScaleToFitCell({
     enabled,
@@ -319,6 +360,8 @@ function ScheduleItem() {
     const teacherCacheRef = useRef<any[] | null>(null);
     const [showEndTime, setShowEndTime] = useState<boolean>(false);
     const [hideTeacherNames, setHideTeacherNames] = useState<boolean>(false);
+    const [showTeacherLoadBalance, setShowTeacherLoadBalance] = useState<boolean>(false);
+    const [selectedOverloadedTeacherIndex, setSelectedOverloadedTeacherIndex] = useState(0);
     const [scaleTextToFitCell, setScaleTextToFitCell] = useState<boolean>(false);
     const [refreshTrigger, setRefreshTrigger] = useState(0);
     const [advancedOrigStart, setAdvancedOrigStart] = useState('');
@@ -456,6 +499,34 @@ function ScheduleItem() {
             }
         }
         setDraggedTeacherBusy(busy);
+    };
+
+    const startExistingBlockDrag = (
+        e: React.DragEvent<HTMLElement>,
+        blockIndex: number,
+        block: any
+    ) => {
+        if (resizing) {
+            e.preventDefault();
+            return;
+        }
+
+        // Safari can cancel an HTML drag if React re-renders the source element
+        // while the browser is still establishing the drag session. Populate the
+        // DataTransfer synchronously, then defer UI/cache state until the next frame.
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("existing_block_index", blockIndex.toString());
+        e.dataTransfer.setData("text/plain", blockIndex.toString());
+
+        requestAnimationFrame(() => {
+            setDraggedSubjectId(block.subjectId);
+            setDraggedSubjectData(block);
+            setHoverSubject(block);
+            setDraggedBlockIndex(blockIndex);
+            if (item?.type === "Student" && block.teachers?.length) {
+                fetchTeacherBusyRanges(block);
+            }
+        });
     };
 
     const fetchOverlappingTeacherSchedules = async (subject: any) => {
@@ -766,40 +837,59 @@ function ScheduleItem() {
             blocks: any[];
         }[] = [];
 
-        for (let i = 0; i < timeblocks.length; i++) {
-            for (let j = i + 1; j < timeblocks.length; j++) {
-                const a = timeblocks[i];
-                const b = timeblocks[j];
+        const canShareOverlap = (a: any, b: any) => {
+            const sameDisplay = a.displayclass && b.displayclass && a.displayclass === b.displayclass;
+            const sameSubject = a.subjectId === b.subjectId;
+            return !(sameSubject && (sameDisplay || !a.displayclass || !b.displayclass));
+        };
 
-                if (hiddenDays[a.start.day] || hiddenDays[b.start.day]) continue;
-                if (hiddenPeriodKeys[getBlockKey(a)] || hiddenPeriodKeys[getBlockKey(b)]) continue;
+        // One N-way window per time slice (not pairwise). Pairwise stacks multiple
+        // zIndex=2 containers on the same cells and steals pointer events.
+        allDays.forEach((day) => {
+            if (hiddenDays[day]) return;
 
-                if (a.start.day !== b.start.day) continue;
+            const dayBlocks = timeblocks.filter((block: any) =>
+                block.start.day === day &&
+                !hiddenPeriodKeys[getBlockKey(block)]
+            );
+            const boundaries = Array.from(new Set(
+                dayBlocks.flatMap((block: any) => [
+                    timeToMinutes(block.start.time),
+                    timeToMinutes(block.end.time),
+                ])
+            )).sort((a, b) => a - b);
 
-                // ⛔ Skip if same block (same subject & displayclass)
-                const sameDisplay = a.displayclass && b.displayclass && a.displayclass === b.displayclass;
-                const sameSubject = a.subjectId === b.subjectId;
+            for (let boundaryIndex = 0; boundaryIndex < boundaries.length - 1; boundaryIndex++) {
+                const start = boundaries[boundaryIndex];
+                const end = boundaries[boundaryIndex + 1];
+                const active = dayBlocks.filter((block: any) =>
+                    timeToMinutes(block.start.time) < end &&
+                    timeToMinutes(block.end.time) > start
+                );
+                const overlapping = active.filter((block: any) =>
+                    active.some((other: any) => other !== block && canShareOverlap(block, other))
+                );
+                if (overlapping.length < 2) continue;
 
-                if (sameSubject && (sameDisplay || !a.displayclass || !b.displayclass)) continue;
+                const previous = overlaps[overlaps.length - 1];
+                const sameBlocks = previous &&
+                    previous.day === day &&
+                    previous.end === minutesToTime(start) &&
+                    previous.blocks.length === overlapping.length &&
+                    previous.blocks.every((block, index) => block === overlapping[index]);
 
-                const startA = timeToMinutes(a.start.time);
-                const endA = timeToMinutes(a.end.time);
-                const startB = timeToMinutes(b.start.time);
-                const endB = timeToMinutes(b.end.time);
-
-                const latestStart = Math.max(startA, startB);
-                const earliestEnd = Math.min(endA, endB);
-
-                if (latestStart < earliestEnd) {
+                if (sameBlocks) {
+                    previous.end = minutesToTime(end);
+                } else {
                     overlaps.push({
-                        day: a.start.day,
-                        start: minutesToTime(latestStart),
-                        end: minutesToTime(earliestEnd),
-                        blocks: [a, b],
+                        day,
+                        start: minutesToTime(start),
+                        end: minutesToTime(end),
+                        blocks: overlapping,
                     });
                 }
             }
-        }
+        });
 
         return overlaps;
     };
@@ -1121,6 +1211,7 @@ function ScheduleItem() {
         if (typeof payload.advancedNewEnd === 'string') setAdvancedNewEnd(payload.advancedNewEnd);
         if (typeof payload.showEndTime === 'boolean') setShowEndTime(payload.showEndTime);
         if (typeof payload.hideTeacherNames === 'boolean') setHideTeacherNames(payload.hideTeacherNames);
+        if (typeof payload.showTeacherLoadBalance === 'boolean') setShowTeacherLoadBalance(payload.showTeacherLoadBalance);
         if (typeof payload.scaleTextToFitCell === 'boolean') setScaleTextToFitCell(payload.scaleTextToFitCell);
         if (payload.hiddenDays && typeof payload.hiddenDays === 'object') {
             setHiddenDays((prev) => ({ ...prev, ...payload.hiddenDays }));
@@ -1155,6 +1246,7 @@ function ScheduleItem() {
         appliedTeacherIds,
         showEndTime,
         hideTeacherNames,
+        showTeacherLoadBalance,
         scaleTextToFitCell,
     });
 
@@ -1619,6 +1711,98 @@ function ScheduleItem() {
         return map;
     }, [item?.type, appliedTeacherIds, resolvedTeachers, timeblocks]);
 
+    const teacherLoadBalance = useMemo(() => {
+        const empty = {
+            overloadedTeachers: [] as TeacherLoadStat[],
+        };
+        if (item?.type !== 'Student') return empty;
+
+        type TeacherAgg = {
+            name: string;
+            durations: number[];
+            blockKeysByDay: Record<string, string[]>;
+            minutesByDay: Record<string, number>;
+            allBlockKeys: Set<string>;
+        };
+
+        const byTeacher = new Map<string, TeacherAgg>();
+
+        timeblocks.forEach((block: any) => {
+            const teachers: string[] = block.teachers || [];
+            if (!teachers.length || !block.start?.day || !block.start?.time || !block.end?.time) return;
+
+            const duration = Math.max(0, timeToMinutes(block.end.time) - timeToMinutes(block.start.time));
+            const day = String(block.start.day);
+            const key = getBlockKey(block);
+
+            teachers.forEach((rawName: string) => {
+                const name = cropSemesterTag(String(rawName || ''));
+                if (!name) return;
+
+                let agg = byTeacher.get(name);
+                if (!agg) {
+                    agg = {
+                        name,
+                        durations: [],
+                        blockKeysByDay: {},
+                        minutesByDay: {
+                            Monday: 0,
+                            Tuesday: 0,
+                            Wednesday: 0,
+                            Thursday: 0,
+                            Friday: 0,
+                        },
+                        allBlockKeys: new Set<string>(),
+                    };
+                    byTeacher.set(name, agg);
+                }
+
+                agg.durations.push(duration);
+                agg.minutesByDay[day] = (agg.minutesByDay[day] || 0) + duration;
+                if (!agg.blockKeysByDay[day]) agg.blockKeysByDay[day] = [];
+                agg.blockKeysByDay[day].push(key);
+                agg.allBlockKeys.add(key);
+            });
+        });
+
+        const overloadedTeachers: TeacherLoadStat[] = Array.from(byTeacher.values())
+            .map((agg) => {
+                const balancedMax = balancedPeakDailyMinutes(agg.durations, SCHEDULE_WEEKDAYS.length);
+                const overloadedDays: string[] = [];
+                const overloadedBlockKeys = new Set<string>();
+
+                SCHEDULE_WEEKDAYS.forEach((day) => {
+                    const dayMins = agg.minutesByDay[day] || 0;
+                    if (dayMins > balancedMax) {
+                        overloadedDays.push(day);
+                        (agg.blockKeysByDay[day] || []).forEach((k) => overloadedBlockKeys.add(k));
+                    }
+                });
+
+                return {
+                    name: agg.name,
+                    overloadedDays,
+                    overloadedBlockKeys,
+                    allBlockKeys: agg.allBlockKeys,
+                };
+            })
+            .filter((stat) => stat.overloadedDays.length > 0)
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        return { overloadedTeachers };
+    }, [item?.type, timeblocks]);
+
+    useEffect(() => {
+        const count = teacherLoadBalance.overloadedTeachers.length;
+        if (count === 0) {
+            if (selectedOverloadedTeacherIndex !== 0) setSelectedOverloadedTeacherIndex(0);
+            return;
+        }
+        if (selectedOverloadedTeacherIndex >= count) {
+            setSelectedOverloadedTeacherIndex(0);
+        }
+    }, [teacherLoadBalance.overloadedTeachers, selectedOverloadedTeacherIndex]);
+
     if (loading) {
         return (
             <Center h="100vh">
@@ -1940,6 +2124,24 @@ function ScheduleItem() {
             setTimeblocks(prev => prev.slice(0, -1));
         }
     };
+    const activeOverloadedTeacher =
+        showTeacherLoadBalance && item?.type === 'Student'
+            ? teacherLoadBalance.overloadedTeachers[selectedOverloadedTeacherIndex] || null
+            : null;
+
+    const getTeacherLoadHighlightKind = (block: any): 'heavy' | 'soft' | null => {
+        if (!activeOverloadedTeacher) return null;
+        const key = getBlockKey(block);
+        if (!activeOverloadedTeacher.allBlockKeys.has(key)) return null;
+        return activeOverloadedTeacher.overloadedBlockKeys.has(key) ? 'heavy' : 'soft';
+    };
+
+    const teacherLoadHighlightProps = (kind: 'heavy' | 'soft' | null) => {
+        if (kind === 'heavy') return teacherLoadHeavyHighlightStyles;
+        if (kind === 'soft') return teacherLoadSoftHighlightStyles;
+        return {};
+    };
+
     // fontFamily="'Times New Roman', Times, serif"
     return (
         <>
@@ -2326,6 +2528,7 @@ function ScheduleItem() {
                         const renderSoloSegment = (segStartMin: number, segEndMin: number, key: string) => {
                             const segStart = minutesToTime(segStartMin);
                             const segEnd = minutesToTime(segEndMin);
+                            const loadHighlightKind = getTeacherLoadHighlightKind(block);
                             return (
                                 <Box
                                     key={key}
@@ -2339,7 +2542,8 @@ function ScheduleItem() {
                                     textAlign="center"
                                     px={2}
                                     fontWeight="bold"
-                                    border={selectedBlockIndex === i ? "3px solid blue" : "1px solid black"}
+                                    border={selectedBlockIndex === i ? "3px solid blue" : loadHighlightKind === 'heavy' ? "3px solid #c2410c" : loadHighlightKind === 'soft' ? "3px solid #ca8a04" : "1px solid black"}
+                                    {...teacherLoadHighlightProps(loadHighlightKind)}
                                     zIndex={1}
                                     onClick={(e) => { e.stopPropagation(); setSelectedBlockIndex(i); }}
                                     onDoubleClick={(e) => {
@@ -2348,17 +2552,10 @@ function ScheduleItem() {
                                     }}
                                     draggable={!resizing}
                                     position="relative"
-                                    onDragStart={(e) => {
-                                        if (resizing) { e.preventDefault(); return; }
-                                        e.dataTransfer.effectAllowed = "move";
-                                        e.dataTransfer.setData("existing_block_index", i.toString());
-                                        e.dataTransfer.setData("text/plain", i.toString());
-                                        setDraggedSubjectId(block.subjectId);
-                                        setDraggedSubjectData(block);
-                                        setHoverSubject(block);
-                                        setDraggedBlockIndex(i);
-                                        if (item?.type === "Student" && block.teachers?.length) fetchTeacherBusyRanges(block);
-                                    }}
+                                    cursor={resizing ? "default" : "grab"}
+                                    userSelect="none"
+                                    sx={{ WebkitUserDrag: resizing ? "none" : "element" }}
+                                    onDragStart={(e) => startExistingBlockDrag(e, i, block)}
                                     onDragOver={(e) => {
                                         e.preventDefault(); e.stopPropagation();
                                         setShiftHeld(e.shiftKey); setCmdHeld(e.metaKey);
@@ -2405,7 +2602,7 @@ function ScheduleItem() {
                                         enabled={scaleTextToFitCell}
                                         contentKey={`${getBlockKey(block)}|${hideTeacherNames}|solo`}
                                     >
-                                        <VStack spacing={0} pointerEvents="none" w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
+                                        <VStack spacing={0} pointerEvents="none" sx={{ '& *': { pointerEvents: 'none' } }} w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
                                             <Box>{cropSemesterTag(block.name)}</Box>
                                             {item.type === "Teacher" && block.displayclass && <Box fontWeight="normal" fontSize="sm">{cropSemesterTag(block.displayclass)}</Box>}
                                             {item.type === "Student" && !hideTeacherNames && block.teachers?.length > 0 && <Box fontWeight="normal" fontSize="sm">{block.teachers.map((t: string, idx: number) => cropSemesterTag(t)).join(", ")}</Box>}
@@ -2439,7 +2636,7 @@ function ScheduleItem() {
 
                             segments.push(
                                 <Box
-                                    key={`overlap-${overlap.day}-${overlap.start}-${overlap.end}`}
+                                    key={`overlap-${overlap.day}-${overlap.start}-${overlap.end}-${overlap.blocks.map((b: any) => getBlockKey(b)).join(',')}`}
                                     gridColumn={col}
                                     gridRow={`${overlapStartRow} / span ${overlapRowSpan}`}
                                     position="relative"
@@ -2450,11 +2647,12 @@ function ScheduleItem() {
                                 >
                                     <Box display="flex" height="100%">
                                         {overlap.blocks.map((overlapBlock: any, blockIdx: number) => {
-                                            const originalBlockIndex = timeblocks.findIndex(tb => tb.start.day === overlapBlock.start.day && tb.start.time === overlapBlock.start.time && tb.end.time === overlapBlock.end.time && tb.subjectId === overlapBlock.subjectId);
+                                            const originalBlockIndex = timeblocks.indexOf(overlapBlock);
                                             const isSelected = selectedBlockIndex === originalBlockIndex;
+                                            const loadHighlightKind = getTeacherLoadHighlightKind(overlapBlock);
                                             return (
                                                 <Box
-                                                    key={`overlap-block-${blockIdx}`}
+                                                    key={`overlap-block-${getBlockKey(overlapBlock)}-${blockIdx}`}
                                                     flex={1}
                                                     bg={overlapBlock.color || "teal.400"}
                                                     color="black"
@@ -2465,24 +2663,17 @@ function ScheduleItem() {
                                                     px={1}
                                                     fontWeight="bold"
                                                     fontSize="sm"
-                                                    border={isSelected ? "3px solid blue" : blockIdx > 0 ? "1px solid white" : "none"}
+                                                    border={isSelected ? "3px solid blue" : loadHighlightKind === 'heavy' ? "3px solid #c2410c" : loadHighlightKind === 'soft' ? "3px solid #ca8a04" : blockIdx > 0 ? "1px solid white" : "none"}
                                                     borderLeft={blockIdx > 0 ? "2px solid white" : "none"}
+                                                    {...teacherLoadHighlightProps(loadHighlightKind)}
                                                     position="relative"
-                                                    cursor="pointer"
+                                                    cursor={resizing ? "default" : "grab"}
                                                     draggable={!resizing}
+                                                    userSelect="none"
+                                                    sx={{ WebkitUserDrag: resizing ? "none" : "element" }}
                                                     onClick={(e) => { e.stopPropagation(); setSelectedBlockIndex(originalBlockIndex); }}
                                                     onDoubleClick={(e) => { e.stopPropagation(); openEditingBlock(originalBlockIndex, overlapBlock.start.time, overlapBlock.end.time); }}
-                                                    onDragStart={(e) => {
-                                                        if (resizing) { e.preventDefault(); return; }
-                                                        e.dataTransfer.effectAllowed = "move";
-                                                        e.dataTransfer.setData("existing_block_index", originalBlockIndex.toString());
-                                                        e.dataTransfer.setData("text/plain", originalBlockIndex.toString());
-                                                        setDraggedSubjectId(overlapBlock.subjectId);
-                                                        setDraggedSubjectData(overlapBlock);
-                                                        setHoverSubject(overlapBlock);
-                                                        setDraggedBlockIndex(originalBlockIndex);
-                                                        if (item?.type === "Student" && overlapBlock.teachers?.length) fetchTeacherBusyRanges(overlapBlock);
-                                                    }}
+                                                    onDragStart={(e) => startExistingBlockDrag(e, originalBlockIndex, overlapBlock)}
                                                     onDragOver={(e) => {
                                                         e.preventDefault(); e.stopPropagation();
                                                         setShiftHeld(e.shiftKey); setCmdHeld(e.metaKey);
@@ -2525,7 +2716,7 @@ function ScheduleItem() {
                                                         enabled={scaleTextToFitCell}
                                                         contentKey={`${getBlockKey(overlapBlock)}|${hideTeacherNames}|overlap|${blockIdx}`}
                                                     >
-                                                        <VStack spacing={0} pointerEvents="none" w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
+                                                        <VStack spacing={0} pointerEvents="none" sx={{ '& *': { pointerEvents: 'none' } }} w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
                                                             <Box>{cropSemesterTag(overlapBlock.name)}</Box>
                                                             {item.type === "Teacher" && overlapBlock.displayclass && <Box fontWeight="normal" fontSize="xs">{cropSemesterTag(overlapBlock.displayclass)}</Box>}
                                                             {item.type === "Student" && !hideTeacherNames && overlapBlock.teachers?.length > 0 && <Box fontWeight="normal" fontSize="xs">{overlapBlock.teachers.map((t: string, idx: number) => cropSemesterTag(t)).join(", ")}</Box>}
@@ -2543,6 +2734,7 @@ function ScheduleItem() {
                     }
 
                     // Regular non-overlapping block rendering
+                    const loadHighlightKind = getTeacherLoadHighlightKind(block);
                     return (
                         <Box
                             key={`block-${i}`}
@@ -2556,7 +2748,8 @@ function ScheduleItem() {
                             textAlign="center"
                             px={2}
                             fontWeight="bold"
-                            border={selectedBlockIndex === i ? "3px solid blue" : "1px solid black"}
+                            border={selectedBlockIndex === i ? "3px solid blue" : loadHighlightKind === 'heavy' ? "3px solid #c2410c" : loadHighlightKind === 'soft' ? "3px solid #ca8a04" : "1px solid black"}
+                            {...teacherLoadHighlightProps(loadHighlightKind)}
                             zIndex={1}
                             onClick={(e) => {
                                 e.stopPropagation();
@@ -2568,20 +2761,10 @@ function ScheduleItem() {
                             }}
                             draggable={!resizing}
                             position="relative" // ✅ needed for the handles to position correctly
-                            onDragStart={(e) => {
-                                if (resizing) { e.preventDefault(); return; }
-                                e.dataTransfer.effectAllowed = "move";
-                                e.dataTransfer.setData("existing_block_index", i.toString());
-                                e.dataTransfer.setData("text/plain", i.toString());
-                                setDraggedSubjectId(block.subjectId);
-                                setDraggedSubjectData(block);
-                                setHoverSubject(block);
-                                setDraggedBlockIndex(i);
-                                // Show teacher busy preview immediately if dragging a subject as a student
-                                if (item?.type === "Student" && block.teachers?.length) {
-                                    fetchTeacherBusyRanges(block);
-                                }
-                            }}
+                            cursor={resizing ? "default" : "grab"}
+                            userSelect="none"
+                            sx={{ WebkitUserDrag: resizing ? "none" : "element" }}
+                            onDragStart={(e) => startExistingBlockDrag(e, i, block)}
                             onDragOver={(e) => {
                                 e.preventDefault();
                                 e.stopPropagation();
@@ -2704,7 +2887,7 @@ function ScheduleItem() {
                                 enabled={scaleTextToFitCell}
                                 contentKey={`${getBlockKey(block)}|${hideTeacherNames}|main`}
                             >
-                                <VStack spacing={0} pointerEvents="none" w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
+                                <VStack spacing={0} pointerEvents="none" sx={{ '& *': { pointerEvents: 'none' } }} w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
                                     <Box>{cropSemesterTag(block.name)}</Box>
                                     {item.type === "Teacher" && block.displayclass && (
                                         <Box fontWeight="normal" fontSize="sm">{cropSemesterTag(block.displayclass)}</Box>
@@ -3344,6 +3527,84 @@ function ScheduleItem() {
                 })}
 
             </Box>
+
+            {item?.type === 'Student' && (
+                <Box mt={2} onClick={(e) => e.stopPropagation()}>
+                    <Checkbox
+                        isChecked={showTeacherLoadBalance}
+                        onChange={(e) => setShowTeacherLoadBalance(e.target.checked)}
+                        colorScheme="orange"
+                        size="sm"
+                    >
+                        Teacher load balance
+                    </Checkbox>
+                    {showTeacherLoadBalance && (
+                        <HStack spacing={1} mt={1} align="center" minH="22px" w="fit-content">
+                            <Box
+                                as="button"
+                                type="button"
+                                flexShrink={0}
+                                display="flex"
+                                alignItems="center"
+                                justifyContent="center"
+                                w="22px"
+                                h="22px"
+                                borderRadius="sm"
+                                opacity={teacherLoadBalance.overloadedTeachers.length > 1 ? 1 : 0.35}
+                                cursor={teacherLoadBalance.overloadedTeachers.length > 1 ? 'pointer' : 'default'}
+                                _hover={teacherLoadBalance.overloadedTeachers.length > 1 ? { bg: 'gray.100' } : undefined}
+                                onClick={() => {
+                                    const count = teacherLoadBalance.overloadedTeachers.length;
+                                    if (count <= 1) return;
+                                    setSelectedOverloadedTeacherIndex((prev) => (prev - 1 + count) % count);
+                                }}
+                                aria-label="Previous overloaded teacher"
+                            >
+                                <ChevronLeftIcon boxSize={4} />
+                            </Box>
+                            <Text
+                                fontSize="sm"
+                                fontWeight="medium"
+                                lineHeight="short"
+                                textAlign="center"
+                                flexShrink={0}
+                                w={`${Math.max(
+                                    16,
+                                    ...teacherLoadBalance.overloadedTeachers.map((t) => t.name.length),
+                                    'No uneven teachers'.length,
+                                )}ch`}
+                                overflow="hidden"
+                                textOverflow="ellipsis"
+                                whiteSpace="nowrap"
+                            >
+                                {activeOverloadedTeacher?.name || 'No uneven teachers'}
+                            </Text>
+                            <Box
+                                as="button"
+                                type="button"
+                                flexShrink={0}
+                                display="flex"
+                                alignItems="center"
+                                justifyContent="center"
+                                w="22px"
+                                h="22px"
+                                borderRadius="sm"
+                                opacity={teacherLoadBalance.overloadedTeachers.length > 1 ? 1 : 0.35}
+                                cursor={teacherLoadBalance.overloadedTeachers.length > 1 ? 'pointer' : 'default'}
+                                _hover={teacherLoadBalance.overloadedTeachers.length > 1 ? { bg: 'gray.100' } : undefined}
+                                onClick={() => {
+                                    const count = teacherLoadBalance.overloadedTeachers.length;
+                                    if (count <= 1) return;
+                                    setSelectedOverloadedTeacherIndex((prev) => (prev + 1) % count);
+                                }}
+                                aria-label="Next overloaded teacher"
+                            >
+                                <ChevronRightIcon boxSize={4} />
+                            </Box>
+                        </HStack>
+                    )}
+                </Box>
+            )}
 
             {/* Advanced controls: replace time frame */}
             <Box mt={8} p={4} borderWidth="1px" borderRadius="md" borderColor="gray.200" bg="gray.50">
