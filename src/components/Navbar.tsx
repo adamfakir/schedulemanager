@@ -4,7 +4,7 @@ import {Box, Flex, Button, Spacer, Heading, HStack, VStack, Center, Icon, Divide
     MenuButton,
     MenuList,
     MenuItem,
-    IconButton,  Tabs, TabList, TabPanels, Tab, TabPanel, Input, Text } from '@chakra-ui/react';
+    IconButton,  Tabs, TabList, TabPanels, Tab, TabPanel, Input, Text, Checkbox } from '@chakra-ui/react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { ArrowDownIcon, HamburgerIcon} from '@chakra-ui/icons'
 import { AvailabilityContext } from '../utils/AvailabilityContext';
@@ -37,6 +37,7 @@ import {
     const [addAvailabilityDay, setAddAvailabilityDay] = useState('Monday');
     const [addAvailabilityStart, setAddAvailabilityStart] = useState('');
     const [addAvailabilityEnd, setAddAvailabilityEnd] = useState('');
+    const [excludeEmptyHours, setExcludeEmptyHours] = useState(false);
     const formatTime = (time: string): string => {
         const [h, m] = time.split(":").map(Number);
         return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
@@ -569,17 +570,24 @@ import {
                         (item.required_teach || []).map((rc: any) => rc.$oid || rc);
 
                     return (
-                        <Tabs mt={4} variant="enclosed" w="100%">
-                            <TabList overflowX="auto" whiteSpace="nowrap">
+                        <Tabs mt={4} variant="enclosed" w="100%" flex="1" minH={0} display="flex" flexDirection="column" overflow="hidden"
+                            sx={{
+                                '.chakra-tabs__tab-panels': { flex: 1, minHeight: 0, overflow: 'hidden' },
+                                '.chakra-tabs__tab-panel[hidden]': { display: 'none' },
+                                '.chakra-tabs__tab-panel:not([hidden])': { height: '100%', overflowY: 'auto' },
+                            }}
+                        >
+                            <TabList overflowX="auto" whiteSpace="nowrap" flexShrink={0}>
                                 <Tab flex="none">Availability</Tab>
                                     <Tab flex="none">Students</Tab>
                                     <Tab flex="none">Subjects</Tab>
+                                    <Tab flex="none">Hours</Tab>
                             </TabList>
 
-                            <TabPanels>
+                            <TabPanels flex="1" minH={0} overflow="hidden">
                                 {/* 1) Availability (blank for now) */}
-                                <TabPanel px={1}>
-                                    <VStack align="stretch" spacing={2} maxH="60vh" overflowY="auto">
+                                <TabPanel px={1} h="100%" overflowY="auto">
+                                    <VStack align="stretch" spacing={2}>
 
                                             <Button size="lg" py={"2"}colorScheme="red" onClick={() => {
                                                 const allBusy: TimeBlock[] = [];
@@ -745,8 +753,8 @@ import {
                                 </TabPanel>
 
                                 {/* 2) Students who take classes this teacher teaches */}
-                                <TabPanel px={1}>
-                                    <VStack align="center" spacing={2} maxH="60vh" overflowY="auto">
+                                <TabPanel px={1} h="100%" overflowY="auto">
+                                    <VStack align="center" spacing={2}>
                                         {allStudents
                                             .filter((student: any) => {
                                                 const stuReq: string[] = (student.required_classes || [])
@@ -796,8 +804,8 @@ import {
                                 </TabPanel>
 
                                 {/* 3) Subjects this teacher is required to teach */}
-                                <TabPanel px={1}>
-                                    <VStack align="center" spacing={2} maxH="60vh" overflowY="auto">
+                                <TabPanel px={1} h="100%" overflowY="auto">
+                                    <VStack align="center" spacing={2}>
                                         {(() => {
                                             const blockMinutes = (tb: any) => {
                                                 const start = tb?.start?.time || tb?.starttime;
@@ -943,6 +951,204 @@ import {
                                                     </VStack>
                                                 </Box>
                                             ))}
+                                    </VStack>
+                                </TabPanel>
+
+                                {/* 4) Hours: day/week span with empty gaps */}
+                                <TabPanel px={1} h="100%" overflowY="auto" pb={4}>
+                                    <VStack align="stretch" spacing={3}>
+                                        <Checkbox
+                                            isChecked={excludeEmptyHours}
+                                            onChange={(e) => setExcludeEmptyHours(e.target.checked)}
+                                            size="sm"
+                                            colorScheme="blue"
+                                        >
+                                            Exclude empty time (filled only)
+                                        </Checkbox>
+                                        {(() => {
+                                            const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+                                            const formatHours = (mins: number) => {
+                                                const safe = Math.max(0, Math.round(mins));
+                                                const h = Math.floor(safe / 60);
+                                                const m = safe % 60;
+                                                if (h === 0) return `${m}m`;
+                                                if (m === 0) return `${h}h`;
+                                                return `${h}h ${m}m`;
+                                            };
+                                            const mergeFilled = (intervals: Array<[number, number]>) => {
+                                                if (!intervals.length) return 0;
+                                                const sorted = [...intervals].sort((a, b) => a[0] - b[0]);
+                                                let filled = 0;
+                                                let curStart = sorted[0][0];
+                                                let curEnd = sorted[0][1];
+                                                for (let i = 1; i < sorted.length; i++) {
+                                                    const [s, e] = sorted[i];
+                                                    if (s <= curEnd) {
+                                                        curEnd = Math.max(curEnd, e);
+                                                    } else {
+                                                        filled += curEnd - curStart;
+                                                        curStart = s;
+                                                        curEnd = e;
+                                                    }
+                                                }
+                                                filled += curEnd - curStart;
+                                                return filled;
+                                            };
+                                            const isTeacherBlockAssigned = (subj: any, tb: any) => {
+                                                const subjId = String(subj?._id?.$oid || subj?._id || '');
+                                                const requiredIds = (item?.required_teach || []).map((sid: any) => toSubjectId(sid));
+                                                if (!requiredIds.includes(subjId)) return true;
+                                                const override = (item?.required_teach_overrides || []).find(
+                                                    (ov: any) => toSubjectId(ov?.subject) === subjId
+                                                );
+                                                if (!override) return true;
+                                                const extras = new Set((override?.extratimeblocks || []).map((id: any) => String(id)));
+                                                if (extras.size === 0) return true;
+                                                const tbId = getTimeblockId(tb);
+                                                if (!tbId) return !override?.excludeextras;
+                                                return override?.excludeextras ? !extras.has(tbId) : extras.has(tbId);
+                                            };
+                                            const teacherAllSubjectIds = new Set([
+                                                ...(item?.required_teach || []).map((sid: any) => toSubjectId(sid)),
+                                                ...(item?.can_teach || []).map((sid: any) => toSubjectId(sid)),
+                                            ]);
+
+                                            type DayInterval = { day: string; start: number; end: number };
+                                            const intervals: DayInterval[] = [];
+                                            for (const subj of subjects) {
+                                                const subjId = String(subj?._id?.$oid || subj?._id || '');
+                                                if (!teacherAllSubjectIds.has(subjId)) continue;
+                                                for (const tb of (subj.timeblocks || [])) {
+                                                    if (!isTeacherBlockAssigned(subj, tb)) continue;
+                                                    const start = tb?.start?.time || tb?.starttime;
+                                                    const end = tb?.end?.time || tb?.endtime;
+                                                    const startDay = tb?.start?.day || tb?.startday;
+                                                    const endDay = tb?.end?.day || tb?.endday;
+                                                    if (!start || !end || !startDay || startDay !== endDay) continue;
+                                                    const s = timeToMinutes(start);
+                                                    const e = timeToMinutes(end);
+                                                    if (e <= s) continue;
+                                                    intervals.push({ day: startDay, start: s, end: e });
+                                                }
+                                            }
+                                            for (const tb of (prepTimeblocks || [])) {
+                                                const start = tb?.start?.time || (tb as any)?.starttime;
+                                                const end = tb?.end?.time || (tb as any)?.endtime;
+                                                const startDay = tb?.start?.day || (tb as any)?.startday;
+                                                const endDay = tb?.end?.day || (tb as any)?.endday;
+                                                if (!start || !end || !startDay || startDay !== endDay) continue;
+                                                const s = timeToMinutes(start);
+                                                const e = timeToMinutes(end);
+                                                if (e <= s) continue;
+                                                intervals.push({ day: startDay, start: s, end: e });
+                                            }
+
+                                            const dayStats = days.map((day) => {
+                                                const dayIntervals = intervals.filter((iv) => iv.day === day);
+                                                if (!dayIntervals.length) {
+                                                    return { day, span: 0, filled: 0, empty: 0, earliest: null as string | null, latest: null as string | null };
+                                                }
+                                                const earliest = Math.min(...dayIntervals.map((iv) => iv.start));
+                                                const latest = Math.max(...dayIntervals.map((iv) => iv.end));
+                                                const span = latest - earliest;
+                                                const filled = mergeFilled(dayIntervals.map((iv) => [iv.start, iv.end] as [number, number]));
+                                                const empty = Math.max(0, span - filled);
+                                                const toTime = (min: number) => {
+                                                    const h = Math.floor(min / 60);
+                                                    const m = min % 60;
+                                                    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+                                                };
+                                                return {
+                                                    day,
+                                                    span,
+                                                    filled,
+                                                    empty,
+                                                    earliest: toTime(earliest),
+                                                    latest: toTime(latest),
+                                                };
+                                            });
+
+                                            const totalSpan = dayStats.reduce((s, d) => s + d.span, 0);
+                                            const totalFilled = dayStats.reduce((s, d) => s + d.filled, 0);
+                                            const totalEmpty = dayStats.reduce((s, d) => s + d.empty, 0);
+                                            const totalShown = excludeEmptyHours ? totalFilled : totalSpan;
+
+                                            return (
+                                                <>
+                                                    <Box
+                                                        w="100%"
+                                                        bg="blue.50"
+                                                        border="1px solid"
+                                                        borderColor="blue.300"
+                                                        borderRadius="md"
+                                                        p={3}
+                                                    >
+                                                        <Text fontWeight="bold" fontSize="md">Week total</Text>
+                                                        <Text fontSize="lg" fontWeight="bold">
+                                                            {formatHours(totalShown)}
+                                                        </Text>
+                                                        {!excludeEmptyHours && (
+                                                            <Text fontSize="xs" color="gray.600">
+                                                                Filled {formatHours(totalFilled)} · Empty {formatHours(totalEmpty)}
+                                                            </Text>
+                                                        )}
+                                                        {excludeEmptyHours && (
+                                                            <Text fontSize="xs" color="gray.600">
+                                                                Classes + prep only (gaps excluded)
+                                                            </Text>
+                                                        )}
+                                                    </Box>
+                                                    {dayStats.map((d) => {
+                                                        const shown = excludeEmptyHours ? d.filled : d.span;
+                                                        if (!d.earliest) {
+                                                            return (
+                                                                <Box
+                                                                    key={d.day}
+                                                                    w="100%"
+                                                                    border="1px solid"
+                                                                    borderColor="gray.300"
+                                                                    borderRadius="md"
+                                                                    p={2}
+                                                                    bg="gray.50"
+                                                                >
+                                                                    <Text fontWeight="bold" fontSize="sm">{d.day}</Text>
+                                                                    <Text fontSize="sm" color="gray.500">No classes</Text>
+                                                                </Box>
+                                                            );
+                                                        }
+                                                        return (
+                                                            <Box
+                                                                key={d.day}
+                                                                w="100%"
+                                                                border="1px solid"
+                                                                borderColor="gray.400"
+                                                                borderRadius="md"
+                                                                p={2}
+                                                                bg="white"
+                                                            >
+                                                                <HStack justify="space-between" align="start">
+                                                                    <Text fontWeight="bold" fontSize="sm">{d.day}</Text>
+                                                                    <Text fontWeight="bold" fontSize="sm">{formatHours(shown)}</Text>
+                                                                </HStack>
+                                                                <Text fontSize="xs" color="gray.600">
+                                                                    {formatTime(d.earliest!)} – {formatTime(d.latest!)}
+                                                                </Text>
+                                                                {!excludeEmptyHours && (
+                                                                    <Text fontSize="xs" color="gray.600" mt={1}>
+                                                                        Filled {formatHours(d.filled)} · Empty {formatHours(d.empty)}
+                                                                    </Text>
+                                                                )}
+                                                                {excludeEmptyHours && (
+                                                                    <Text fontSize="xs" color="gray.600" mt={1}>
+                                                                        Filled only (empty was {formatHours(d.empty)})
+                                                                    </Text>
+                                                                )}
+                                                            </Box>
+                                                        );
+                                                    })}
+                                                </>
+                                            );
+                                        })()}
                                     </VStack>
                                 </TabPanel>
                             </TabPanels>
