@@ -98,6 +98,44 @@ const getOrCreateTimeblockId = (tb: any): string => {
     return `tb_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 };
 
+export const PREP_SUBJECT_ID = '__prep__';
+export const PREP_DEFAULT_MINUTES = 35;
+export const PREP_RATIO = 0.2;
+export const PREP_COLOR = '#9ec9db';
+
+const isPrepBlock = (block: any): boolean =>
+    !!block?.isPrep || block?.subjectId === PREP_SUBJECT_ID;
+
+const normalizePrepTimeblock = (tb: any) => {
+    const start = tb?.start
+        ? { day: tb.start.day, time: tb.start.time }
+        : { day: tb.startday, time: tb.starttime };
+    const end = tb?.end
+        ? { day: tb.end.day, time: tb.end.time }
+        : { day: tb.endday, time: tb.endtime };
+    const timeblockId = getTimeblockId(tb) || getOrCreateTimeblockId(tb);
+    return {
+        subjectId: PREP_SUBJECT_ID,
+        isPrep: true,
+        start,
+        end,
+        timeblockId,
+        blockid: timeblockId,
+        color: PREP_COLOR,
+        name: 'Prep',
+        displayclass: '',
+    };
+};
+
+const prepPayloadFromTimeblocks = (blocks: any[]) =>
+    blocks.filter(isPrepBlock).map((tb) => ({
+        startday: tb.start.day,
+        starttime: tb.start.time,
+        endday: tb.end.day,
+        endtime: tb.end.time,
+        blockid: getOrCreateTimeblockId(tb),
+    }));
+
 const getRequiredOverrideForSubject = (teacher: any, subjectId: string): any | null => {
     const overrides = teacher?.required_teach_overrides || [];
     for (const ov of overrides) {
@@ -349,7 +387,24 @@ function ScheduleItem() {
     const [shiftHeld, setShiftHeld] = useState(false);
     const [cmdHeld, setCmdHeld] = useState(false);
     const [stableHoverTime, setStableHoverTime] = useState<string | null>(null);
-    const { availability } = useContext(AvailabilityContext);
+    const { availability, setPrepTimeblocks } = useContext(AvailabilityContext);
+
+    const getTeacherId = (): string =>
+        String(item?._id?.$oid || item?._id || id || '');
+
+    const savePrepTimeblocks = async (nextTimeblocks: any[]) => {
+        const teacherId = getTeacherId();
+        const token = localStorage.getItem('user_token');
+        if (!token || !teacherId) return;
+        const payload = prepPayloadFromTimeblocks(nextTimeblocks);
+        await axios.put(
+            `${API_BASE}/teacher/${teacherId}/update`,
+            { prep_timeblocks: payload },
+            { headers: { Authorization: token } }
+        );
+        setPrepTimeblocks(payload.map(normalizePrepTimeblock));
+        await updateTeacherCacheFromBackend(teacherId);
+    };
     const [draggedTeacherBusy, setDraggedTeacherBusy] = useState<TimeBlock[]>([]);
     const [overlappingTeacherSchedules, setOverlappingTeacherSchedules] = useState<any[]>([]);
     const [swapReplaceHover, setSwapReplaceHover] = useState<{
@@ -605,32 +660,32 @@ function ScheduleItem() {
         const token = localStorage.getItem("user_token");
         try {
             await executePutWithSaving(async () => {
-                // Update dragged subject
-                await axios.put(`${API_BASE}/subject/${draggedBlock.subjectId}/update`, {
-                    timeblocks: newTimeblocks
-                        .filter(tb => tb.subjectId === draggedBlock.subjectId)
-                        .map(tb => ({
-                            startday: tb.start.day,
-                            starttime: tb.start.time,
-                            endday: tb.end.day,
-                            endtime: tb.end.time,
-                            blockid: getOrCreateTimeblockId(tb),
-                        }))
-                }, { headers: { Authorization: token } });
+                const persistSide = async (block: any) => {
+                    if (isPrepBlock(block)) {
+                        await savePrepTimeblocks(newTimeblocks);
+                        return;
+                    }
+                    await axios.put(`${API_BASE}/subject/${block.subjectId}/update`, {
+                        timeblocks: newTimeblocks
+                            .filter(tb => tb.subjectId === block.subjectId && !isPrepBlock(tb))
+                            .map(tb => ({
+                                startday: tb.start.day,
+                                starttime: tb.start.time,
+                                endday: tb.end.day,
+                                endtime: tb.end.time,
+                                blockid: getOrCreateTimeblockId(tb),
+                            }))
+                    }, { headers: { Authorization: token } });
+                };
 
-                // Update target subject
-                await axios.put(`${API_BASE}/subject/${targetBlock.subjectId}/update`, {
-                    timeblocks: newTimeblocks
-                        .filter(tb => tb.subjectId === targetBlock.subjectId)
-                        .map(tb => ({
-                            startday: tb.start.day,
-                            starttime: tb.start.time,
-                            endday: tb.end.day,
-                            endtime: tb.end.time,
-                            blockid: getOrCreateTimeblockId(tb),
-                        }))
-                }, { headers: { Authorization: token } });
-            }, [draggedBlock.subjectId, targetBlock.subjectId]);
+                await persistSide(draggedBlock);
+                if (
+                    draggedBlock.subjectId !== targetBlock.subjectId ||
+                    isPrepBlock(draggedBlock) !== isPrepBlock(targetBlock)
+                ) {
+                    await persistSide(targetBlock);
+                }
+            }, [draggedBlock.subjectId, targetBlock.subjectId].filter((sid) => sid && sid !== PREP_SUBJECT_ID));
         } catch (err) {
             console.error("❌ Failed to swap blocks:", err);
             // Revert on error
@@ -668,36 +723,33 @@ function ScheduleItem() {
         const token = localStorage.getItem("user_token");
         try {
             await executePutWithSaving(async () => {
-                // Update dragged subject (add the new position)
-                const draggedSubjectBlocks = newTimeblocks
-                    .filter(tb => tb.subjectId === draggedBlock.subjectId)
-                    .map(tb => ({
-                        startday: tb.start.day,
-                        starttime: tb.start.time,
-                        endday: tb.end.day,
-                        endtime: tb.end.time,
-                        blockid: getOrCreateTimeblockId(tb),
-                    }));
-                
-                await axios.put(`${API_BASE}/subject/${draggedBlock.subjectId}/update`, {
-                    timeblocks: draggedSubjectBlocks
-                }, { headers: { Authorization: token } });
+                const persistSide = async (block: any) => {
+                    if (isPrepBlock(block)) {
+                        await savePrepTimeblocks(newTimeblocks);
+                        return;
+                    }
+                    const subjectBlocks = newTimeblocks
+                        .filter(tb => tb.subjectId === block.subjectId && !isPrepBlock(tb))
+                        .map(tb => ({
+                            startday: tb.start.day,
+                            starttime: tb.start.time,
+                            endday: tb.end.day,
+                            endtime: tb.end.time,
+                            blockid: getOrCreateTimeblockId(tb),
+                        }));
+                    await axios.put(`${API_BASE}/subject/${block.subjectId}/update`, {
+                        timeblocks: subjectBlocks
+                    }, { headers: { Authorization: token } });
+                };
 
-                // Update target subject (remove the old block)
-                const targetSubjectBlocks = newTimeblocks
-                    .filter(tb => tb.subjectId === targetBlock.subjectId)
-                    .map(tb => ({
-                        startday: tb.start.day,
-                        starttime: tb.start.time,
-                        endday: tb.end.day,
-                        endtime: tb.end.time,
-                        blockid: getOrCreateTimeblockId(tb),
-                    }));
-                
-                await axios.put(`${API_BASE}/subject/${targetBlock.subjectId}/update`, {
-                    timeblocks: targetSubjectBlocks
-                }, { headers: { Authorization: token } });
-            }, [draggedBlock.subjectId, targetBlock.subjectId]);
+                await persistSide(draggedBlock);
+                if (
+                    draggedBlock.subjectId !== targetBlock.subjectId ||
+                    isPrepBlock(draggedBlock) !== isPrepBlock(targetBlock)
+                ) {
+                    await persistSide(targetBlock);
+                }
+            }, [draggedBlock.subjectId, targetBlock.subjectId].filter((sid) => sid && sid !== PREP_SUBJECT_ID));
         } catch (err) {
             console.error("❌ Failed to replace block:", err);
             // Revert on error
@@ -718,7 +770,7 @@ function ScheduleItem() {
     useEffect(() => {
         const handle = (e: KeyboardEvent) => {
             setShiftHeld(e.shiftKey);
-            setCmdHeld(e.metaKey); // Cmd key on Mac, Ctrl on Windows/Linux
+            setCmdHeld(e.metaKey || e.ctrlKey);
         };
         window.addEventListener("keydown", handle);
         window.addEventListener("keyup", handle);
@@ -791,26 +843,30 @@ function ScheduleItem() {
             setTimeblocks(newTimeblocks);
 
             // 3) Prepare payload for only this subject’s blocks
-            const subjectId = newTimeblocks[blockIndex].subjectId;
-            const payloadBlocks = newTimeblocks
-                .filter(tb => tb.subjectId === subjectId)
-                .map(tb => ({
-                    startday:  tb.start.day,
-                    starttime: tb.start.time,
-                    endday:    tb.end.day,
-                    endtime:   tb.end.time,
-                    blockid: getOrCreateTimeblockId(tb),
-                }));
-
-            // 4) Send update to server
+            const mutated = newTimeblocks[blockIndex];
             try {
-                const token = localStorage.getItem("user_token");
-                await axios.put(
-                    `${API_BASE}/subject/${subjectId}/update`,
-                    { timeblocks: payloadBlocks },
-                    { headers: { Authorization: token } }
-                );
-                await updateSubjectCacheFromBackend(subjectId);
+                if (isPrepBlock(mutated)) {
+                    await savePrepTimeblocks(newTimeblocks);
+                } else {
+                    const subjectId = mutated.subjectId;
+                    const payloadBlocks = newTimeblocks
+                        .filter(tb => tb.subjectId === subjectId && !isPrepBlock(tb))
+                        .map(tb => ({
+                            startday:  tb.start.day,
+                            starttime: tb.start.time,
+                            endday:    tb.end.day,
+                            endtime:   tb.end.time,
+                            blockid: getOrCreateTimeblockId(tb),
+                        }));
+
+                    const token = localStorage.getItem("user_token");
+                    await axios.put(
+                        `${API_BASE}/subject/${subjectId}/update`,
+                        { timeblocks: payloadBlocks },
+                        { headers: { Authorization: token } }
+                    );
+                    await updateSubjectCacheFromBackend(subjectId);
+                }
             } catch (err) {
                 console.error("❌ Failed to save resized block:", err);
             }
@@ -928,22 +984,28 @@ function ScheduleItem() {
                 setSelectedBlockIndex(null);
 
                 try {
-                    await executePutWithSaving(async () => {
-                        await axios.put(`${API_BASE}/subject/${subjectId}/update`, {
-                        // only send *that* subject’s updated blocks
-                        timeblocks: newTimeblocks
-                            .filter(tb => tb.subjectId === subjectId)
-                            .map(tb => ({
-                                startday: tb.start.day,
-                                starttime: tb.start.time,
-                                endday: tb.end.day,
-                                endtime: tb.end.time,
-                                blockid: getOrCreateTimeblockId(tb),
-                            }))
-                    }, {
-                        headers: { Authorization: token }
-                    });
-                    }, subjectId);
+                    if (isPrepBlock(block)) {
+                        await executePutWithSaving(async () => {
+                            await savePrepTimeblocks(newTimeblocks);
+                        });
+                    } else {
+                        await executePutWithSaving(async () => {
+                            await axios.put(`${API_BASE}/subject/${subjectId}/update`, {
+                            // only send *that* subject’s updated blocks
+                            timeblocks: newTimeblocks
+                                .filter(tb => tb.subjectId === subjectId && !isPrepBlock(tb))
+                                .map(tb => ({
+                                    startday: tb.start.day,
+                                    starttime: tb.start.time,
+                                    endday: tb.end.day,
+                                    endtime: tb.end.time,
+                                    blockid: getOrCreateTimeblockId(tb),
+                                }))
+                        }, {
+                            headers: { Authorization: token }
+                        });
+                        }, subjectId);
+                    }
                 } catch (err) {
                     console.error("❌ Failed to delete block from backend:", err);
                     // Revert on error
@@ -1017,12 +1079,14 @@ function ScheduleItem() {
                 const teacher = await loadTeacherById(token, id, { allow404: true });
                 if (teacher) {
                     setItem({ type: "Teacher", ...teacher });
+                    const normalizedPrep = (teacher.prep_timeblocks || []).map(normalizePrepTimeblock);
+                    setPrepTimeblocks(normalizedPrep);
 
                     const subjectIdSet = new Set(
                         [...(teacher.required_teach || []), ...(teacher.can_teach || [])].map((sid: any) => sid.$oid || sid)
                     );
                     const uniqueSubjectIds = Array.from(subjectIdSet);
-                    let blocks: any[] = [];
+                    let blocks: any[] = [...normalizedPrep];
                     if (uniqueSubjectIds.length > 0) {
                         const batchRes = await axios.post(`${API_BASE}/subject/batch`, { ids: uniqueSubjectIds }, {
                             headers: { Authorization: token }
@@ -1153,6 +1217,7 @@ function ScheduleItem() {
         const token = localStorage.getItem('user_token');
         const results: { subjectId: string; ok: boolean }[] = [];
 
+        let workingTimeblocks = [...timeblocks];
         for (const subjectId of subjectIdsToUpdate) {
             try {
                 const subjectBlocks = bySubject.get(subjectId) || [];
@@ -1170,17 +1235,37 @@ function ScheduleItem() {
                     }
                     return tb;
                 });
-                const payload = updatedBlocks.map((tb: any) => ({
-                    startday: tb.start.day,
-                    starttime: tb.start.time,
-                    endday: tb.end.day,
-                    endtime: tb.end.time,
-                    blockid: getOrCreateTimeblockId(tb),
-                }));
-                await axios.put(`${API_BASE}/subject/${subjectId}/update`, { timeblocks: payload }, {
-                    headers: { Authorization: token }
+                workingTimeblocks = workingTimeblocks.map((tb: any) => {
+                    if (tb.subjectId !== subjectId) return tb;
+                    if (
+                        advancedDays[tb.start.day] &&
+                        tb.start.time === origStart &&
+                        tb.end.time === origEnd
+                    ) {
+                        return {
+                            ...tb,
+                            start: { ...tb.start, time: newStart },
+                            end: { ...tb.end, time: newEnd },
+                        };
+                    }
+                    return tb;
                 });
-                await updateSubjectCacheFromBackend(subjectId);
+
+                if (subjectId === PREP_SUBJECT_ID) {
+                    await savePrepTimeblocks(workingTimeblocks);
+                } else {
+                    const payload = updatedBlocks.map((tb: any) => ({
+                        startday: tb.start.day,
+                        starttime: tb.start.time,
+                        endday: tb.end.day,
+                        endtime: tb.end.time,
+                        blockid: getOrCreateTimeblockId(tb),
+                    }));
+                    await axios.put(`${API_BASE}/subject/${subjectId}/update`, { timeblocks: payload }, {
+                        headers: { Authorization: token }
+                    });
+                    await updateSubjectCacheFromBackend(subjectId);
+                }
                 results.push({ subjectId, ok: true });
             } catch (err) {
                 console.error('Replace time frame failed for subject', subjectId, err);
@@ -2037,22 +2122,28 @@ function ScheduleItem() {
             setTimeblocks(newTimeblocks);
 
             try {
-                const token = localStorage.getItem("user_token");
-                await executePutWithSaving(async () => {
-                    await axios.put(`${API_BASE}/subject/${subjectId}/update`, {
-                        timeblocks: newTimeblocks
-                            .filter(tb => tb.subjectId === subjectId)
-                            .map(tb => ({
-                                startday: tb.start.day,
-                                starttime: tb.start.time,
-                                endday: tb.end.day,
-                                endtime: tb.end.time,
-                                blockid: getOrCreateTimeblockId(tb),
-                            }))
-                    }, {
-                        headers: { Authorization: token }
+                if (isPrepBlock(block)) {
+                    await executePutWithSaving(async () => {
+                        await savePrepTimeblocks(newTimeblocks);
                     });
-                }, subjectId);
+                } else {
+                    const token = localStorage.getItem("user_token");
+                    await executePutWithSaving(async () => {
+                        await axios.put(`${API_BASE}/subject/${subjectId}/update`, {
+                            timeblocks: newTimeblocks
+                                .filter(tb => tb.subjectId === subjectId && !isPrepBlock(tb))
+                                .map(tb => ({
+                                    startday: tb.start.day,
+                                    starttime: tb.start.time,
+                                    endday: tb.end.day,
+                                    endtime: tb.end.time,
+                                    blockid: getOrCreateTimeblockId(tb),
+                                }))
+                        }, {
+                            headers: { Authorization: token }
+                        });
+                    }, subjectId);
+                }
             } catch (err) {
                 console.error("Move failed:", err);
                 // Revert on error
@@ -2063,6 +2154,30 @@ function ScheduleItem() {
             setSelectedBlockIndex(null);
             return;
         }
+
+        // New prep block on teacher schedule
+        if (subjectId === PREP_SUBJECT_ID || getDraggedSubjectData()?.isPrep) {
+            if (item?.type !== "Teacher") return;
+            const startMin = timeToMinutes(time);
+            const endTime = minutesToTime(startMin + PREP_DEFAULT_MINUTES);
+            const newBlock = normalizePrepTimeblock({
+                start: { day, time },
+                end: { day, time: endTime },
+            });
+            const newTimeblocks = [...timeblocks, newBlock];
+            setTimeblocks(newTimeblocks);
+            try {
+                await executePutWithSaving(async () => {
+                    await savePrepTimeblocks(newTimeblocks);
+                });
+                setDragHover(null);
+            } catch (err) {
+                console.error("Prep drop failed:", err);
+                setTimeblocks(timeblocks);
+            }
+            return;
+        }
+
         if (!subjectId || item?.type !== "Student") return;
 
         const token = localStorage.getItem("user_token");
@@ -2396,7 +2511,7 @@ function ScheduleItem() {
                                             e.preventDefault();
                                             e.stopPropagation();
                                             setShiftHeld(e.shiftKey);
-                                            setCmdHeld(e.metaKey);
+                                            setCmdHeld(e.metaKey || e.ctrlKey);
                                             const subjectId = getDraggedSubjectId();
                                             if (!subjectId) return;
 
@@ -2558,7 +2673,7 @@ function ScheduleItem() {
                                     onDragStart={(e) => startExistingBlockDrag(e, i, block)}
                                     onDragOver={(e) => {
                                         e.preventDefault(); e.stopPropagation();
-                                        setShiftHeld(e.shiftKey); setCmdHeld(e.metaKey);
+                                        setShiftHeld(e.shiftKey); setCmdHeld(e.metaKey || e.ctrlKey);
                                         setDragHover(null); setStableHoverTime(null);
                                         if (draggedBlockIndex !== null && !isBeingDragged && draggedBlockIndex !== i) {
                                             const rect = e.currentTarget.getBoundingClientRect();
@@ -2676,7 +2791,7 @@ function ScheduleItem() {
                                                     onDragStart={(e) => startExistingBlockDrag(e, originalBlockIndex, overlapBlock)}
                                                     onDragOver={(e) => {
                                                         e.preventDefault(); e.stopPropagation();
-                                                        setShiftHeld(e.shiftKey); setCmdHeld(e.metaKey);
+                                                        setShiftHeld(e.shiftKey); setCmdHeld(e.metaKey || e.ctrlKey);
                                                         setDragHover(null); setStableHoverTime(null);
                                                         if (draggedBlockIndex !== null && draggedBlockIndex !== originalBlockIndex) {
                                                             const rect = e.currentTarget.getBoundingClientRect();
@@ -2769,7 +2884,7 @@ function ScheduleItem() {
                                 e.preventDefault();
                                 e.stopPropagation();
                                 setShiftHeld(e.shiftKey);
-                                setCmdHeld(e.metaKey);
+                                setCmdHeld(e.metaKey || e.ctrlKey);
                                 
                                 // Clear drag hover when over a block (since we're not over an empty cell)
                                 setDragHover(null);
@@ -3348,19 +3463,23 @@ function ScheduleItem() {
                                             try {
                                                 await executePutWithSaving(async () => {
                                                     if (hasTimeChanged) {
-                                                        await axios.put(`${API_BASE}/subject/${block.subjectId}/update`, {
-                                                            timeblocks: newTimeblocks
-                                                                .filter(tb => tb.subjectId === block.subjectId)
-                                                                .map(tb => ({
-                                                                    startday: tb.start.day,
-                                                                    starttime: tb.start.time,
-                                                                    endday: tb.end.day,
-                                                                    endtime: tb.end.time,
-                                                                    blockid: getOrCreateTimeblockId(tb),
-                                                                }))
-                                                        }, {
-                                                            headers: { Authorization: token }
-                                                        });
+                                                        if (isPrepBlock(block)) {
+                                                            await savePrepTimeblocks(newTimeblocks);
+                                                        } else {
+                                                            await axios.put(`${API_BASE}/subject/${block.subjectId}/update`, {
+                                                                timeblocks: newTimeblocks
+                                                                    .filter(tb => tb.subjectId === block.subjectId && !isPrepBlock(tb))
+                                                                    .map(tb => ({
+                                                                        startday: tb.start.day,
+                                                                        starttime: tb.start.time,
+                                                                        endday: tb.end.day,
+                                                                        endtime: tb.end.time,
+                                                                        blockid: getOrCreateTimeblockId(tb),
+                                                                    }))
+                                                            }, {
+                                                                headers: { Authorization: token }
+                                                            });
+                                                        }
                                                     }
 
                                                     if (hasTeacherChanges) {
@@ -3421,7 +3540,7 @@ function ScheduleItem() {
                                                         });
                                                         touchedSubjectIds.forEach((sid) => refreshSubjectTeacherNames(sid));
                                                     }
-                                                }, touchedSubjectIds);
+                                                }, isPrepBlock(block) ? undefined : touchedSubjectIds.filter((sid) => sid !== PREP_SUBJECT_ID));
 
                                                 setPendingCheckboxUpdates((prev) => {
                                                     const next = { ...prev };

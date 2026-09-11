@@ -3,11 +3,15 @@ import React, { createContext, useState, ReactNode } from 'react';
 export type TimeBlock = {
     start: { day: string; time: string };
     end:   { day: string; time: string };
+    blockid?: string;
+    timeblockId?: string;
 };
 
 export type AvailContextType = {
     availability: TimeBlock[];
     setAvailability: (b: TimeBlock[]) => void;
+    prepTimeblocks: TimeBlock[];
+    setPrepTimeblocks: (b: TimeBlock[]) => void;
     editing: boolean;
     setEditing: (e: boolean) => void;
     mode: 'available' | 'busy';
@@ -17,6 +21,8 @@ export type AvailContextType = {
 export const AvailabilityContext = createContext<AvailContextType>({
     availability: [],
     setAvailability: () => {},
+    prepTimeblocks: [],
+    setPrepTimeblocks: () => {},
     editing: false,
     setEditing: () => {},
     mode: 'available',
@@ -25,12 +31,14 @@ export const AvailabilityContext = createContext<AvailContextType>({
 
 export function AvailabilityProvider({ children }: { children: ReactNode }) {
     const [availability, setAvailability] = useState<TimeBlock[]>([]);
+    const [prepTimeblocks, setPrepTimeblocks] = useState<TimeBlock[]>([]);
     const [editing,    setEditing]    = useState(false);
     const [mode,       setMode]       = useState<'available'|'busy'>('available');
 
     return (
         <AvailabilityContext.Provider value={{
             availability, setAvailability,
+            prepTimeblocks, setPrepTimeblocks,
             editing, setEditing,
             mode, setMode
         }}>

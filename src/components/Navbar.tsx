@@ -67,6 +67,7 @@ import {
     };
     const {
         availability, setAvailability,
+        prepTimeblocks, setPrepTimeblocks,
         editing, setEditing,
         mode, setMode
     } = useContext(AvailabilityContext);
@@ -243,6 +244,7 @@ import {
                 setItem(teacherData);
                 setScheduleType("Teacher");
                 setAvailability(teacherData.availability || []);
+                setPrepTimeblocks(teacherData.prep_timeblocks || []);
 
                 const [subjectsList, studentsList] = await Promise.all([
                     subjectsPromise,
@@ -796,6 +798,120 @@ import {
                                 {/* 3) Subjects this teacher is required to teach */}
                                 <TabPanel px={1}>
                                     <VStack align="center" spacing={2} maxH="60vh" overflowY="auto">
+                                        {(() => {
+                                            const blockMinutes = (tb: any) => {
+                                                const start = tb?.start?.time || tb?.starttime;
+                                                const end = tb?.end?.time || tb?.endtime;
+                                                const startDay = tb?.start?.day || tb?.startday;
+                                                const endDay = tb?.end?.day || tb?.endday;
+                                                if (!start || !end || !startDay || startDay !== endDay) return 0;
+                                                return Math.max(0, timeToMinutes(end) - timeToMinutes(start));
+                                            };
+                                            const isTeacherBlockAssigned = (subj: any, tb: any) => {
+                                                const subjId = String(subj?._id?.$oid || subj?._id || '');
+                                                const requiredIds = (item?.required_teach || []).map((sid: any) => toSubjectId(sid));
+                                                if (!requiredIds.includes(subjId)) return true;
+                                                const override = (item?.required_teach_overrides || []).find(
+                                                    (ov: any) => toSubjectId(ov?.subject) === subjId
+                                                );
+                                                if (!override) return true;
+                                                const extras = new Set((override?.extratimeblocks || []).map((id: any) => String(id)));
+                                                if (extras.size === 0) return true;
+                                                const tbId = getTimeblockId(tb);
+                                                if (!tbId) return !override?.excludeextras;
+                                                return override?.excludeextras ? !extras.has(tbId) : extras.has(tbId);
+                                            };
+                                            const teacherAllSubjectIds = new Set([
+                                                ...(item?.required_teach || []).map((sid: any) => toSubjectId(sid)),
+                                                ...(item?.can_teach || []).map((sid: any) => toSubjectId(sid)),
+                                            ]);
+                                            let teachingMinutes = 0;
+                                            for (const subj of subjects) {
+                                                const subjId = String(subj?._id?.$oid || subj?._id || '');
+                                                if (!teacherAllSubjectIds.has(subjId)) continue;
+                                                if (subj.fixed) continue;
+                                                for (const tb of (subj.timeblocks || [])) {
+                                                    if (!isTeacherBlockAssigned(subj, tb)) continue;
+                                                    teachingMinutes += blockMinutes(tb);
+                                                }
+                                            }
+                                            const targetPrep = Math.round(teachingMinutes * 0.2);
+                                            const scheduledPrep = (prepTimeblocks || []).reduce(
+                                                (sum: number, tb: any) => sum + blockMinutes(tb),
+                                                0
+                                            );
+                                            const pctOfTeaching = teachingMinutes > 0
+                                                ? Math.round((scheduledPrep / teachingMinutes) * 1000) / 10
+                                                : 0;
+                                            let statusLabel = 'No teaching time yet';
+                                            let statusColor = 'gray.100';
+                                            let borderColor = 'gray.400';
+                                            if (teachingMinutes > 0) {
+                                                if (targetPrep === 0) {
+                                                    statusLabel = 'No prep needed';
+                                                    statusColor = 'gray.100';
+                                                } else if (scheduledPrep < targetPrep * 0.9) {
+                                                    statusLabel = `Under target (${pctOfTeaching}% of teaching)`;
+                                                    statusColor = 'orange.100';
+                                                    borderColor = 'orange.400';
+                                                } else if (scheduledPrep > targetPrep * 1.1) {
+                                                    statusLabel = `Over target (${pctOfTeaching}% of teaching)`;
+                                                    statusColor = 'red.100';
+                                                    borderColor = 'red.400';
+                                                } else {
+                                                    statusLabel = `On target (~20% of teaching)`;
+                                                    statusColor = 'green.100';
+                                                    borderColor = 'green.500';
+                                                }
+                                            }
+
+                                            return (
+                                                <Box
+                                                    w="100%"
+                                                    bg={statusColor}
+                                                    color="black"
+                                                    px={2}
+                                                    py={3}
+                                                    border={`2px solid`}
+                                                    borderColor={borderColor}
+                                                    borderRadius="md"
+                                                    draggable
+                                                    onDragStart={(e: React.DragEvent) => {
+                                                        e.dataTransfer.setData("subject_id", "__prep__");
+                                                        setDraggedSubjectId("__prep__");
+                                                        setDraggedSubjectData({
+                                                            isPrep: true,
+                                                            name: "Prep",
+                                                            displayname: "Prep",
+                                                            minld: 35,
+                                                            maxld: 35,
+                                                            color: "#9ec9db",
+                                                        });
+                                                        e.dataTransfer.effectAllowed = "move";
+                                                    }}
+                                                    onDragEnd={() => {
+                                                        window.dispatchEvent(new CustomEvent("clearDragPreview"));
+                                                    }}
+                                                    cursor="grab"
+                                                    _hover={{ opacity: 0.9 }}
+                                                >
+                                                    <VStack spacing={0}>
+                                                        <Text fontWeight="bold" fontSize="md">
+                                                            Prep
+                                                        </Text>
+                                                        <Text fontSize="sm" color="gray.700" fontWeight="normal">
+                                                            {scheduledPrep} / {targetPrep} min
+                                                        </Text>
+                                                        <Text fontSize="xs" color="gray.600" fontWeight="normal" textAlign="center">
+                                                            {statusLabel}
+                                                        </Text>
+                                                        <Text fontSize="xs" color="gray.500" fontWeight="normal">
+                                                            Drag to schedule (35 min)
+                                                        </Text>
+                                                    </VStack>
+                                                </Box>
+                                            );
+                                        })()}
                                         {subjects
                                             .filter((subj: any) =>
                                                 teacherSubjectIds.includes(subj._id.$oid || subj._id)
