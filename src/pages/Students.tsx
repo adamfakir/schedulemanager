@@ -26,13 +26,16 @@ import {
     ModalContent,
     ModalFooter,
     ModalBody,
-    ModalCloseButton, ModalHeader, ModalOverlay, InputGroup, InputLeftElement, Collapse, Divider, Switch
+    ModalCloseButton, ModalHeader, ModalOverlay, InputGroup, InputLeftElement, Collapse, Divider, Switch,
+    Checkbox,
+    Progress,
 } from '@chakra-ui/react';
-import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, EditIcon, CopyIcon} from "@chakra-ui/icons";
+import {AddIcon, ArrowUpIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, DeleteIcon, DownloadIcon, EditIcon, CopyIcon} from "@chakra-ui/icons";
 import {FaThumbtack} from "react-icons/fa";
 import { useNavigate, Link } from 'react-router-dom';
 import { usePageTitle } from '../utils/usePageTitle';
-import { API_BASE, getStudentsFromCache, getSubjectsFromCache, loadAllStudents, loadAllSubjects, loadUserSelf } from '../utils/apiClient';
+import { API_BASE, getStudentsFromCache, getSubjectsFromCache, getTeachersFromCache, loadAllStudents, loadAllSubjects, loadAllTeachers, loadUserSelf } from '../utils/apiClient';
+import { exportEntitiesSchedulesToPdf } from '../utils/pdfExport';
 
 interface User {
     full_name: string;
@@ -60,6 +63,11 @@ function Students() {
     const [allSubjects, setAllSubjects] = useState<any[]>([]);
     const [subjectSearch, setSubjectSearch] = useState("");
     const [subjectFilterMode, setSubjectFilterMode] = useState<"all" | "required">("all");
+    const [allTeachers, setAllTeachers] = useState<any[]>([]);
+    const [pdfExporting, setPdfExporting] = useState(false);
+    const [pdfProgress, setPdfProgress] = useState({ current: 0, total: 0, name: '' });
+    const [hideTeacherNamesInPdf, setHideTeacherNamesInPdf] = useState(false);
+    const [showEndTimeInPdf, setShowEndTimeInPdf] = useState(false);
     const navigate = useNavigate();
     useEffect(() => {
         const storedPinned = localStorage.getItem('pinned_student_ids');
@@ -93,6 +101,11 @@ function Students() {
         const cachedSubjects = getSubjectsFromCache();
         if (cachedSubjects) {
             setAllSubjects(cachedSubjects);
+        }
+
+        const cachedTeachers = getTeachersFromCache();
+        if (cachedTeachers) {
+            setAllTeachers(cachedTeachers);
         }
 
         loadUserSelf(token)
@@ -132,6 +145,10 @@ function Students() {
                 setAllSubjects(data);
             })
             .catch((err) => console.error("Failed to load subjects", err));
+
+        loadAllTeachers(token, { preferCache: false })
+            .then((data) => setAllTeachers(data || []))
+            .catch((err) => console.error("Failed to load teachers", err));
     }, []);
 
 
@@ -242,21 +259,46 @@ function Students() {
             })
             .catch((err) => console.error("Delete failed", err));
     };
-    // @ts-ignore
     const sortedStudents = [...filteredStudents].sort((a, b) => {
         const aPinned = pinnedStudentIds.includes(a._id?.$oid);
         const bPinned = pinnedStudentIds.includes(b._id?.$oid);
         return Number(bPinned) - Number(aPinned); // pinned first
     });
+
+    const handleExportPdf = async () => {
+        if (!sortedStudents.length) {
+            window.alert('No students match the current filters.');
+            return;
+        }
+        setPdfExporting(true);
+        setPdfProgress({ current: 0, total: sortedStudents.length, name: '' });
+        try {
+            await exportEntitiesSchedulesToPdf({
+                entities: sortedStudents,
+                type: 'Student',
+                subjects: allSubjects,
+                teachers: allTeachers,
+                hideTeacherNames: hideTeacherNamesInPdf,
+                showEndTime: showEndTimeInPdf,
+                onProgress: setPdfProgress,
+            });
+        } catch (err: any) {
+            console.error('PDF export failed', err);
+            window.alert(err?.message || 'PDF export failed');
+        } finally {
+            setPdfExporting(false);
+        }
+    };
+
     return (
         <Box p={1}>
             <VStack align="center" justify="center" spacing={3}>
                 <Heading size="lg">Students</Heading>
-                <HStack w="full" align="center" justify="center" spacing={5}>
+                <HStack w="full" align="center" justify="center" spacing={3}>
                     <Input
                         placeholder="Search students..."
                         size="md"
-                        width="80%"
+                        width="70%"
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                     />
@@ -266,7 +308,51 @@ function Students() {
                         onOpen();
                     }}
                     >Create</Button>
-
+                    <Menu closeOnSelect={false} placement="bottom-end">
+                        <MenuButton
+                            as={Button}
+                            colorScheme="purple"
+                            rightIcon={<ChevronDownIcon />}
+                            leftIcon={<DownloadIcon />}
+                            isLoading={pdfExporting}
+                            loadingText={pdfProgress.total ? `${pdfProgress.current}/${pdfProgress.total}` : 'Exporting'}
+                            isDisabled={!sortedStudents.length || pdfExporting}
+                        >
+                            Export PDF
+                        </MenuButton>
+                        <MenuList minW="260px" zIndex={20}>
+                            <Box px={3} py={2}>
+                                <Text fontSize="sm" fontWeight="bold" mb={2}>
+                                    Export {sortedStudents.length} student{sortedStudents.length === 1 ? '' : 's'}
+                                </Text>
+                                <VStack align="stretch" spacing={2}>
+                                    <Checkbox
+                                        isChecked={showEndTimeInPdf}
+                                        onChange={(e) => setShowEndTimeInPdf(e.target.checked)}
+                                        size="sm"
+                                    >
+                                        Show end time column
+                                    </Checkbox>
+                                    <Checkbox
+                                        isChecked={hideTeacherNamesInPdf}
+                                        onChange={(e) => setHideTeacherNamesInPdf(e.target.checked)}
+                                        size="sm"
+                                    >
+                                        Hide teacher names
+                                    </Checkbox>
+                                </VStack>
+                            </Box>
+                            <MenuDivider />
+                            <MenuItem
+                                icon={<DownloadIcon />}
+                                onClick={handleExportPdf}
+                                isDisabled={!sortedStudents.length || pdfExporting}
+                                fontWeight="bold"
+                            >
+                                Download PDF
+                            </MenuItem>
+                        </MenuList>
+                    </Menu>
                 </HStack>
                 <HStack w="full" align="center" justify="center" spacing={5}>
                     <Menu closeOnSelect={false}>
@@ -303,8 +389,21 @@ function Students() {
                             </MenuOptionGroup>
                         </MenuList>
                     </Menu>
-
                 </HStack>
+                {pdfExporting && (
+                    <Box w="80%">
+                        <Text fontSize="sm" mb={1}>
+                            Exporting {pdfProgress.name} ({pdfProgress.current}/{pdfProgress.total})
+                        </Text>
+                        <Progress
+                            size="sm"
+                            value={pdfProgress.total ? (pdfProgress.current / pdfProgress.total) * 100 : 0}
+                            colorScheme="purple"
+                            hasStripe
+                            isAnimated
+                        />
+                    </Box>
+                )}
                 {/* Scrollable list of items */}
                 <Box
                     mt={4}
