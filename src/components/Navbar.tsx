@@ -9,7 +9,7 @@ import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { ArrowDownIcon, HamburgerIcon} from '@chakra-ui/icons'
 import { AvailabilityContext } from '../utils/AvailabilityContext';
 import { teacherCacheGlobal, subjectCacheGlobal, studentCacheGlobal } from '../utils/globalCache';
-import { getStudentsFromCache, getSubjectsFromCache, getTeachersFromCache, loadAllStudents, loadAllSubjects, loadAllTeachers, loadStudentById, loadSubjectById, loadTeacherById } from '../utils/apiClient';
+import { API_BASE, getStudentsFromCache, getSubjectsFromCache, getTeachersFromCache, loadAllStudents, loadAllSubjects, loadAllTeachers, loadStudentById, loadSubjectById, loadTeacherById } from '../utils/apiClient';
 
 import axios from 'axios';
 import {
@@ -22,7 +22,19 @@ import {
     setHoverSubject,
     getLoadedSubjectId,
     setLoadedSubjectId, setDraggedSubjectData
-} from '../utils/dragSubjectStore';const Navbar = () => {
+} from '../utils/dragSubjectStore';
+import {
+    PREP_SUBJECT_ID,
+    PREP_DEFAULT_MINUTES,
+    PREP_COLOR,
+    DEFAULT_MEETING_COLOR,
+    DEFAULT_CUSTOM_COLOR,
+    OFFICE_DEFAULT_MINUTES,
+    meetingSubjectId,
+    customSubjectId,
+} from '../utils/officeBlocks';
+
+const Navbar = () => {
     const navigate = useNavigate();
     const location = useLocation();
     const isSchedulePage = location.pathname.startsWith("/schedule/");
@@ -38,6 +50,15 @@ import {
     const [addAvailabilityStart, setAddAvailabilityStart] = useState('');
     const [addAvailabilityEnd, setAddAvailabilityEnd] = useState('');
     const [excludeEmptyHours, setExcludeEmptyHours] = useState(false);
+    const [allTeachers, setAllTeachers] = useState<any[]>([]);
+    const [meetingName, setMeetingName] = useState('');
+    const [meetingColor, setMeetingColor] = useState(DEFAULT_MEETING_COLOR);
+    const [meetingTeacherIds, setMeetingTeacherIds] = useState<string[]>([]);
+    const [meetingTeacherSearch, setMeetingTeacherSearch] = useState('');
+    const [customDraftName, setCustomDraftName] = useState('');
+    const [customDraftColor, setCustomDraftColor] = useState(DEFAULT_CUSTOM_COLOR);
+    const [creatingMeeting, setCreatingMeeting] = useState(false);
+    const [savingCustomTemplate, setSavingCustomTemplate] = useState(false);
     const formatTime = (time: string): string => {
         const [h, m] = time.split(":").map(Number);
         return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
@@ -69,6 +90,9 @@ import {
     const {
         availability, setAvailability,
         prepTimeblocks, setPrepTimeblocks,
+        customBlockTemplates, setCustomBlockTemplates,
+        customTimeblocks, setCustomTimeblocks,
+        meetings, setMeetings,
         editing, setEditing,
         mode, setMode
     } = useContext(AvailabilityContext);
@@ -246,14 +270,29 @@ import {
                 setScheduleType("Teacher");
                 setAvailability(teacherData.availability || []);
                 setPrepTimeblocks(teacherData.prep_timeblocks || []);
+                const templates = (teacherData.custom_block_templates || []).map((t: any) => ({
+                    template_id: String(t.template_id || t.id || ''),
+                    name: t.name || 'Note',
+                    color: t.color || DEFAULT_CUSTOM_COLOR,
+                }));
+                setCustomBlockTemplates(templates.filter((t: any) => t.template_id));
+                setCustomTimeblocks(teacherData.custom_timeblocks || []);
+                const teacherId = String(teacherData._id?.$oid || teacherData._id || id);
+                setMeetingTeacherIds([teacherId]);
 
-                const [subjectsList, studentsList] = await Promise.all([
+                const [subjectsList, studentsList, teachersList, meetingsRes] = await Promise.all([
                     subjectsPromise,
                     studentsPromise,
+                    loadAllTeachers(token, { preferCache: false }),
+                    axios.get(`${API_BASE}/meeting/for_teacher/${teacherId}`, {
+                        headers: { Authorization: token },
+                    }).catch(() => ({ data: [] })),
                 ]);
                 if (!active) return;
                 setAllStudents(studentsList || []);
                 setSubjects(subjectsList || []);
+                setAllTeachers(teachersList || []);
+                setMeetings(meetingsRes.data || []);
                 return;
             }
 
@@ -581,6 +620,7 @@ import {
                                 <Tab flex="none">Availability</Tab>
                                     <Tab flex="none">Students</Tab>
                                     <Tab flex="none">Subjects</Tab>
+                                    <Tab flex="none">Office</Tab>
                                     <Tab flex="none">Hours</Tab>
                             </TabList>
 
@@ -806,7 +846,51 @@ import {
                                 {/* 3) Subjects this teacher is required to teach */}
                                 <TabPanel px={1} h="100%" overflowY="auto">
                                     <VStack align="center" spacing={2}>
+                                        {subjects
+                                            .filter((subj: any) =>
+                                                teacherSubjectIds.includes(subj._id.$oid || subj._id)
+                                            )
+                                            .map((subj: any) => (
+                                                <Box
+                                                    key={subj._id.$oid || subj._id}
+                                                    as={Link}
+                                                    to={`/schedule/${subj._id.$oid || subj._id}`}
+                                                    w="100%"
+                                                    bg={subj.color || "gray.300"}
+                                                    color="black"
+                                                    px={2}
+                                                    py={3}
+                                                    border="1px solid black"
+                                                    borderRadius="md"
+                                                    cursor="pointer"
+                                                    _hover={{ opacity: 0.9 }}
+                                                    textDecoration="none"
+                                                    display="block"
+                                                >
+                                                    <VStack spacing={0}>
+                                                        <Text fontWeight="bold" fontSize="md">
+                                                            {subj.displayname || subj.name}
+                                                        </Text>
+                                                        <Text fontSize="sm">
+                                                            {subj.displayclass}
+                                                        </Text>
+                                                    </VStack>
+                                                </Box>
+                                            ))}
+                                    </VStack>
+                                </TabPanel>
+
+                                {/* 3b) Office: prep, meetings, custom */}
+                                <TabPanel px={1} h="100%" overflowY="auto">
+                                    <VStack align="stretch" spacing={4}>
                                         {(() => {
+                                            const teacherId = String(item?._id?.$oid || item?._id || scheduleId || '');
+                                            const token = localStorage.getItem('user_token') || '';
+                                            const newTemplateId = () =>
+                                                (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+                                                    ? crypto.randomUUID().replace(/-/g, '')
+                                                    : `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
                                             const blockMinutes = (tb: any) => {
                                                 const start = tb?.start?.time || tb?.starttime;
                                                 const end = tb?.end?.time || tb?.endtime;
@@ -873,84 +957,369 @@ import {
                                                 }
                                             }
 
+                                            const saveTemplates = async (next: any[]) => {
+                                                setCustomBlockTemplates(next);
+                                                await axios.put(
+                                                    `${API_BASE}/teacher/${teacherId}/update`,
+                                                    { custom_block_templates: next },
+                                                    { headers: { Authorization: token } }
+                                                );
+                                            };
+
+                                            const createMeeting = async () => {
+                                                const name = meetingName.trim() || 'Meeting';
+                                                const ids = meetingTeacherIds.length ? meetingTeacherIds : [teacherId];
+                                                setCreatingMeeting(true);
+                                                try {
+                                                    const res = await axios.post(
+                                                        `${API_BASE}/meeting/create`,
+                                                        { name, color: meetingColor, teacher_ids: ids, timeblocks: [] },
+                                                        { headers: { Authorization: token } }
+                                                    );
+                                                    const created = res.data?.meeting;
+                                                    if (created) setMeetings([created, ...(meetings || [])]);
+                                                    setMeetingName('');
+                                                    setMeetingColor(DEFAULT_MEETING_COLOR);
+                                                    setMeetingTeacherIds([teacherId]);
+                                                } catch (err) {
+                                                    console.error('Failed to create meeting', err);
+                                                } finally {
+                                                    setCreatingMeeting(false);
+                                                }
+                                            };
+
+                                            const addCustomTemplate = async () => {
+                                                const name = customDraftName.trim();
+                                                if (!name || !teacherId) return;
+                                                setSavingCustomTemplate(true);
+                                                try {
+                                                    const next = [
+                                                        ...(customBlockTemplates || []),
+                                                        { template_id: newTemplateId(), name, color: customDraftColor || DEFAULT_CUSTOM_COLOR },
+                                                    ];
+                                                    await saveTemplates(next);
+                                                    setCustomDraftName('');
+                                                    setCustomDraftColor(DEFAULT_CUSTOM_COLOR);
+                                                } catch (err) {
+                                                    console.error('Failed to save custom template', err);
+                                                } finally {
+                                                    setSavingCustomTemplate(false);
+                                                }
+                                            };
+
+                                            const deleteCustomTemplate = async (templateId: string) => {
+                                                const next = (customBlockTemplates || []).filter((t) => t.template_id !== templateId);
+                                                try {
+                                                    await axios.put(
+                                                        `${API_BASE}/teacher/${teacherId}/update`,
+                                                        {
+                                                            custom_block_templates: next,
+                                                            // instances for this template are cleared by ScheduleItem when deleted from grid;
+                                                            // if deleting unused chip, leave timeblocks alone
+                                                        },
+                                                        { headers: { Authorization: token } }
+                                                    );
+                                                    setCustomBlockTemplates(next);
+                                                    window.dispatchEvent(new CustomEvent('officeCustomTemplateDeleted', { detail: { templateId } }));
+                                                } catch (err) {
+                                                    console.error('Failed to delete custom template', err);
+                                                }
+                                            };
+
+                                            const deleteMeeting = async (meetingId: string) => {
+                                                try {
+                                                    await axios.delete(`${API_BASE}/meeting/${meetingId}/delete`, {
+                                                        headers: { Authorization: token },
+                                                    });
+                                                    setMeetings((meetings || []).filter((m: any) => String(m._id?.$oid || m._id || m.id) !== meetingId));
+                                                    window.dispatchEvent(new CustomEvent('officeMeetingDeleted', { detail: { meetingId } }));
+                                                } catch (err) {
+                                                    console.error('Failed to delete meeting', err);
+                                                }
+                                            };
+
                                             return (
-                                                <Box
-                                                    w="100%"
-                                                    bg={statusColor}
-                                                    color="black"
-                                                    px={2}
-                                                    py={3}
-                                                    border={`2px solid`}
-                                                    borderColor={borderColor}
-                                                    borderRadius="md"
-                                                    draggable
-                                                    onDragStart={(e: React.DragEvent) => {
-                                                        e.dataTransfer.setData("subject_id", "__prep__");
-                                                        setDraggedSubjectId("__prep__");
-                                                        setDraggedSubjectData({
-                                                            isPrep: true,
-                                                            name: "Prep",
-                                                            displayname: "Prep",
-                                                            minld: 35,
-                                                            maxld: 35,
-                                                            color: "#9ec9db",
-                                                        });
-                                                        e.dataTransfer.effectAllowed = "move";
-                                                    }}
-                                                    onDragEnd={() => {
-                                                        window.dispatchEvent(new CustomEvent("clearDragPreview"));
-                                                    }}
-                                                    cursor="grab"
-                                                    _hover={{ opacity: 0.9 }}
-                                                >
-                                                    <VStack spacing={0}>
-                                                        <Text fontWeight="bold" fontSize="md">
-                                                            Prep
-                                                        </Text>
-                                                        <Text fontSize="sm" color="gray.700" fontWeight="normal">
-                                                            {scheduledPrep} / {targetPrep} min
-                                                        </Text>
-                                                        <Text fontSize="xs" color="gray.600" fontWeight="normal" textAlign="center">
-                                                            {statusLabel}
-                                                        </Text>
-                                                        <Text fontSize="xs" color="gray.500" fontWeight="normal">
-                                                            Drag to schedule (35 min)
-                                                        </Text>
-                                                    </VStack>
-                                                </Box>
+                                                <>
+                                                    <Box>
+                                                        <Heading size="sm" mb={2}>Prep</Heading>
+                                                        <Box
+                                                            w="100%"
+                                                            bg={statusColor}
+                                                            color="black"
+                                                            px={2}
+                                                            py={3}
+                                                            border={`2px solid`}
+                                                            borderColor={borderColor}
+                                                            borderRadius="md"
+                                                            draggable
+                                                            onDragStart={(e: React.DragEvent) => {
+                                                                e.dataTransfer.setData("subject_id", PREP_SUBJECT_ID);
+                                                                setDraggedSubjectId(PREP_SUBJECT_ID);
+                                                                setDraggedSubjectData({
+                                                                    isPrep: true,
+                                                                    name: "Prep",
+                                                                    displayname: "Prep",
+                                                                    minld: PREP_DEFAULT_MINUTES,
+                                                                    maxld: PREP_DEFAULT_MINUTES,
+                                                                    color: PREP_COLOR,
+                                                                });
+                                                                setHoverSubject({
+                                                                    isPrep: true,
+                                                                    name: "Prep",
+                                                                    teachers: [],
+                                                                });
+                                                                e.dataTransfer.effectAllowed = "move";
+                                                            }}
+                                                            onDragEnd={() => {
+                                                                window.dispatchEvent(new CustomEvent("clearDragPreview"));
+                                                            }}
+                                                            cursor="grab"
+                                                            _hover={{ opacity: 0.9 }}
+                                                        >
+                                                            <VStack spacing={0}>
+                                                                <Text fontWeight="bold" fontSize="md">Prep</Text>
+                                                                <Text fontSize="sm" color="gray.700" fontWeight="normal">
+                                                                    {scheduledPrep} / {targetPrep} min
+                                                                </Text>
+                                                                <Text fontSize="xs" color="gray.600" fontWeight="normal" textAlign="center">
+                                                                    {statusLabel}
+                                                                </Text>
+                                                                <Text fontSize="xs" color="gray.500" fontWeight="normal">
+                                                                    Drag to schedule ({PREP_DEFAULT_MINUTES} min)
+                                                                </Text>
+                                                            </VStack>
+                                                        </Box>
+                                                    </Box>
+
+                                                    <Divider />
+
+                                                    <Box>
+                                                        <Heading size="sm" mb={2}>Meetings</Heading>
+                                                        <VStack align="stretch" spacing={2} mb={3}>
+                                                            <Input
+                                                                size="sm"
+                                                                placeholder="Meeting name"
+                                                                value={meetingName}
+                                                                onChange={(e) => setMeetingName(e.target.value)}
+                                                            />
+                                                            <HStack>
+                                                                <Text fontSize="sm" minW="40px">Color</Text>
+                                                                <Input
+                                                                    type="color"
+                                                                    value={meetingColor}
+                                                                    onChange={(e) => setMeetingColor(e.target.value)}
+                                                                    w="60px"
+                                                                    p={0}
+                                                                    h="32px"
+                                                                />
+                                                            </HStack>
+                                                            <Text fontSize="xs" fontWeight="bold">Teachers</Text>
+                                                            <Input
+                                                                size="sm"
+                                                                placeholder="Search teachers..."
+                                                                value={meetingTeacherSearch}
+                                                                onChange={(e) => setMeetingTeacherSearch(e.target.value)}
+                                                                mb={1}
+                                                            />
+                                                            <VStack align="stretch" maxH="140px" overflowY="auto" spacing={1}>
+                                                                {allTeachers
+                                                                    .filter((t: any) => {
+                                                                        const term = meetingTeacherSearch.trim().toLowerCase();
+                                                                        if (!term) return true;
+                                                                        const name = String(t.displayname || t.name || '').toLowerCase();
+                                                                        return name.includes(term);
+                                                                    })
+                                                                    .map((t: any) => {
+                                                                    const tid = String(t._id?.$oid || t._id);
+                                                                    const checked = meetingTeacherIds.includes(tid);
+                                                                    return (
+                                                                        <Checkbox
+                                                                            key={tid}
+                                                                            size="sm"
+                                                                            isChecked={checked}
+                                                                            onChange={(e) => {
+                                                                                if (e.target.checked) {
+                                                                                    setMeetingTeacherIds([...meetingTeacherIds, tid]);
+                                                                                } else {
+                                                                                    setMeetingTeacherIds(meetingTeacherIds.filter((id) => id !== tid));
+                                                                                }
+                                                                            }}
+                                                                        >
+                                                                            {t.displayname || t.name}
+                                                                        </Checkbox>
+                                                                    );
+                                                                })}
+                                                            </VStack>
+                                                            <Button
+                                                                size="sm"
+                                                                colorScheme="teal"
+                                                                isLoading={creatingMeeting}
+                                                                onClick={createMeeting}
+                                                                isDisabled={!meetingTeacherIds.length}
+                                                            >
+                                                                Create meeting
+                                                            </Button>
+                                                        </VStack>
+                                                        <VStack align="stretch" spacing={2}>
+                                                            {(meetings || []).map((m: any) => {
+                                                                const mid = String(m._id?.$oid || m._id || m.id);
+                                                                const names = m.teacher_names || [];
+                                                                return (
+                                                                    <Box
+                                                                        key={mid}
+                                                                        w="100%"
+                                                                        bg={m.color || DEFAULT_MEETING_COLOR}
+                                                                        color="black"
+                                                                        px={2}
+                                                                        py={3}
+                                                                        border="1px solid black"
+                                                                        borderRadius="md"
+                                                                        position="relative"
+                                                                        draggable
+                                                                        onDragStart={(e: React.DragEvent) => {
+                                                                            e.dataTransfer.setData("subject_id", meetingSubjectId(mid));
+                                                                            e.dataTransfer.setData("meeting_id", mid);
+                                                                            setDraggedSubjectId(meetingSubjectId(mid));
+                                                                            const payload = {
+                                                                                isMeeting: true,
+                                                                                meetingId: mid,
+                                                                                name: m.name || 'Meeting',
+                                                                                displayname: m.name || 'Meeting',
+                                                                                color: m.color || DEFAULT_MEETING_COLOR,
+                                                                                teachers: names,
+                                                                                teacherIds: (m.teacher_ids || []).map(String),
+                                                                                minld: OFFICE_DEFAULT_MINUTES,
+                                                                                maxld: OFFICE_DEFAULT_MINUTES,
+                                                                            };
+                                                                            setDraggedSubjectData(payload);
+                                                                            setHoverSubject(payload);
+                                                                            e.dataTransfer.effectAllowed = "move";
+                                                                        }}
+                                                                        onDragEnd={() => {
+                                                                            window.dispatchEvent(new CustomEvent("clearDragPreview"));
+                                                                        }}
+                                                                        cursor="grab"
+                                                                        _hover={{ opacity: 0.9 }}
+                                                                    >
+                                                                        <Button
+                                                                            size="xs"
+                                                                            position="absolute"
+                                                                            top={1}
+                                                                            right={1}
+                                                                            colorScheme="red"
+                                                                            variant="ghost"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                deleteMeeting(mid);
+                                                                            }}
+                                                                        >
+                                                                            ×
+                                                                        </Button>
+                                                                        <VStack spacing={0} pr={4}>
+                                                                            <Text fontWeight="bold" fontSize="md">{m.name || 'Meeting'}</Text>
+                                                                            <Text fontSize="xs" color="gray.700" textAlign="center">
+                                                                                {names.join(', ') || 'No teachers'}
+                                                                            </Text>
+                                                                            <Text fontSize="xs" color="gray.500">Hold ⌘ while dragging to preview</Text>
+                                                                        </VStack>
+                                                                    </Box>
+                                                                );
+                                                            })}
+                                                        </VStack>
+                                                    </Box>
+
+                                                    <Divider />
+
+                                                    <Box>
+                                                        <Heading size="sm" mb={2}>Custom</Heading>
+                                                        <VStack align="stretch" spacing={2} mb={3}>
+                                                            <Input
+                                                                size="sm"
+                                                                placeholder="Label"
+                                                                value={customDraftName}
+                                                                onChange={(e) => setCustomDraftName(e.target.value)}
+                                                            />
+                                                            <HStack>
+                                                                <Text fontSize="sm" minW="40px">Color</Text>
+                                                                <Input
+                                                                    type="color"
+                                                                    value={customDraftColor}
+                                                                    onChange={(e) => setCustomDraftColor(e.target.value)}
+                                                                    w="60px"
+                                                                    p={0}
+                                                                    h="32px"
+                                                                />
+                                                                <Button
+                                                                    size="sm"
+                                                                    colorScheme="blue"
+                                                                    isLoading={savingCustomTemplate}
+                                                                    onClick={addCustomTemplate}
+                                                                    isDisabled={!customDraftName.trim()}
+                                                                >
+                                                                    Add
+                                                                </Button>
+                                                            </HStack>
+                                                        </VStack>
+                                                        <VStack align="stretch" spacing={2}>
+                                                            {(customBlockTemplates || []).map((tpl) => (
+                                                                <Box
+                                                                    key={tpl.template_id}
+                                                                    w="100%"
+                                                                    bg={tpl.color || DEFAULT_CUSTOM_COLOR}
+                                                                    color="black"
+                                                                    px={2}
+                                                                    py={3}
+                                                                    border="1px solid black"
+                                                                    borderRadius="md"
+                                                                    position="relative"
+                                                                    draggable
+                                                                    onDragStart={(e: React.DragEvent) => {
+                                                                        const sid = customSubjectId(tpl.template_id);
+                                                                        e.dataTransfer.setData("subject_id", sid);
+                                                                        e.dataTransfer.setData("template_id", tpl.template_id);
+                                                                        setDraggedSubjectId(sid);
+                                                                        setDraggedSubjectData({
+                                                                            isCustom: true,
+                                                                            templateId: tpl.template_id,
+                                                                            name: tpl.name,
+                                                                            displayname: tpl.name,
+                                                                            color: tpl.color || DEFAULT_CUSTOM_COLOR,
+                                                                            minld: OFFICE_DEFAULT_MINUTES,
+                                                                            maxld: OFFICE_DEFAULT_MINUTES,
+                                                                        });
+                                                                        e.dataTransfer.effectAllowed = "move";
+                                                                    }}
+                                                                    onDragEnd={() => {
+                                                                        window.dispatchEvent(new CustomEvent("clearDragPreview"));
+                                                                    }}
+                                                                    cursor="grab"
+                                                                    _hover={{ opacity: 0.9 }}
+                                                                >
+                                                                    <Button
+                                                                        size="xs"
+                                                                        position="absolute"
+                                                                        top={1}
+                                                                        right={1}
+                                                                        colorScheme="red"
+                                                                        variant="ghost"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            deleteCustomTemplate(tpl.template_id);
+                                                                        }}
+                                                                    >
+                                                                        ×
+                                                                    </Button>
+                                                                    <VStack spacing={0} pr={4}>
+                                                                        <Text fontWeight="bold" fontSize="md">{tpl.name}</Text>
+                                                                        <Text fontSize="xs" color="gray.500">Drag to schedule</Text>
+                                                                    </VStack>
+                                                                </Box>
+                                                            ))}
+                                                        </VStack>
+                                                    </Box>
+                                                </>
                                             );
                                         })()}
-                                        {subjects
-                                            .filter((subj: any) =>
-                                                teacherSubjectIds.includes(subj._id.$oid || subj._id)
-                                            )
-                                            .map((subj: any) => (
-                                                <Box
-                                                    key={subj._id.$oid || subj._id}
-                                                    as={Link}
-                                                    to={`/schedule/${subj._id.$oid || subj._id}`}
-                                                    w="100%"
-                                                    bg={subj.color || "gray.300"}
-                                                    color="black"
-                                                    px={2}
-                                                    py={3}
-                                                    border="1px solid black"
-                                                    borderRadius="md"
-                                                    cursor="pointer"
-                                                    _hover={{ opacity: 0.9 }}
-                                                    textDecoration="none"
-                                                    display="block"
-                                                >
-                                                    <VStack spacing={0}>
-                                                        <Text fontWeight="bold" fontSize="md">
-                                                            {subj.displayname || subj.name}
-                                                        </Text>
-                                                        <Text fontSize="sm">
-                                                            {subj.displayclass}
-                                                        </Text>
-                                                    </VStack>
-                                                </Box>
-                                            ))}
                                     </VStack>
                                 </TabPanel>
 
@@ -1042,6 +1411,30 @@ import {
                                                 if (e <= s) continue;
                                                 intervals.push({ day: startDay, start: s, end: e });
                                             }
+                                            for (const tb of (customTimeblocks || [])) {
+                                                const start = tb?.start?.time || tb?.starttime;
+                                                const end = tb?.end?.time || tb?.endtime;
+                                                const startDay = tb?.start?.day || tb?.startday;
+                                                const endDay = tb?.end?.day || tb?.endday;
+                                                if (!start || !end || !startDay || startDay !== endDay) continue;
+                                                const s = timeToMinutes(start);
+                                                const e = timeToMinutes(end);
+                                                if (e <= s) continue;
+                                                intervals.push({ day: startDay, start: s, end: e });
+                                            }
+                                            for (const meeting of (meetings || [])) {
+                                                for (const tb of (meeting.timeblocks || [])) {
+                                                    const start = tb?.start?.time || tb?.starttime;
+                                                    const end = tb?.end?.time || tb?.endtime;
+                                                    const startDay = tb?.start?.day || tb?.startday;
+                                                    const endDay = tb?.end?.day || tb?.endday;
+                                                    if (!start || !end || !startDay || startDay !== endDay) continue;
+                                                    const s = timeToMinutes(start);
+                                                    const e = timeToMinutes(end);
+                                                    if (e <= s) continue;
+                                                    intervals.push({ day: startDay, start: s, end: e });
+                                                }
+                                            }
 
                                             const dayStats = days.map((day) => {
                                                 const dayIntervals = intervals.filter((iv) => iv.day === day);
@@ -1094,7 +1487,7 @@ import {
                                                         )}
                                                         {excludeEmptyHours && (
                                                             <Text fontSize="xs" color="gray.600">
-                                                                Classes + prep only (gaps excluded)
+                                                                Classes + office blocks only (gaps excluded)
                                                             </Text>
                                                         )}
                                                     </Box>

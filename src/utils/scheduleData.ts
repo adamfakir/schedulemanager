@@ -1,8 +1,15 @@
+import {
+    PREP_COLOR,
+    PREP_SUBJECT_ID,
+    normalizeCustomTimeblock,
+    normalizeMeetingTimeblock,
+} from './officeBlocks';
+
 /** Shared helpers for building schedule blocks used by PDF export. */
 
 export const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'] as const;
-export const PREP_COLOR = '#9ec9db';
-export const PREP_SUBJECT_ID = '__prep__';
+// Re-export for callers that imported from here historically
+export { PREP_COLOR, PREP_SUBJECT_ID };
 
 export type ScheduleBlock = {
     subjectId: string;
@@ -13,6 +20,8 @@ export type ScheduleBlock = {
     displayclass?: string;
     teachers?: string[];
     isPrep?: boolean;
+    isMeeting?: boolean;
+    isCustom?: boolean;
 };
 
 export type DayHoursStat = {
@@ -131,7 +140,7 @@ export const buildStudentScheduleBlocks = (
     return blocks;
 };
 
-export const buildTeacherScheduleBlocks = (teacher: any, subjects: any[]): ScheduleBlock[] => {
+export const buildTeacherScheduleBlocks = (teacher: any, subjects: any[], meetings: any[] = []): ScheduleBlock[] => {
     const subjectIdSet = new Set<string>(
         [...(teacher?.required_teach || []), ...(teacher?.can_teach || [])].map((sid: any) => getSubjectIdRef(sid))
     );
@@ -150,6 +159,39 @@ export const buildTeacherScheduleBlocks = (teacher: any, subjects: any[]): Sched
             color: PREP_COLOR,
             name: 'Prep',
             displayclass: '',
+        });
+    });
+
+    (teacher?.custom_timeblocks || []).forEach((tb: any) => {
+        const n = normalizeCustomTimeblock(tb);
+        const times = normalizeBlockTimes(n);
+        if (!times) return;
+        blocks.push({
+            subjectId: n.subjectId,
+            isCustom: true,
+            start: { day: times.day, time: times.start },
+            end: { day: times.day, time: times.end },
+            color: n.color,
+            name: n.name,
+            displayclass: '',
+        });
+    });
+
+    (meetings || []).forEach((meeting: any) => {
+        (meeting.timeblocks || []).forEach((tb: any) => {
+            const n = normalizeMeetingTimeblock(meeting, tb);
+            const times = normalizeBlockTimes(n);
+            if (!times) return;
+            blocks.push({
+                subjectId: n.subjectId,
+                isMeeting: true,
+                start: { day: times.day, time: times.start },
+                end: { day: times.day, time: times.end },
+                color: n.color,
+                name: n.name,
+                teachers: n.teachers,
+                displayclass: '',
+            });
         });
     });
 
@@ -198,7 +240,7 @@ const mergeFilledMinutes = (intervals: Array<[number, number]>): number => {
 };
 
 /** Same logic as the teacher Hours tab in Navbar. */
-export const computeTeacherHours = (teacher: any, subjects: any[]): HoursSummary => {
+export const computeTeacherHours = (teacher: any, subjects: any[], meetings: any[] = []): HoursSummary => {
     const teacherAllSubjectIds = new Set<string>([
         ...(teacher?.required_teach || []).map((sid: any) => getSubjectIdRef(sid)),
         ...(teacher?.can_teach || []).map((sid: any) => getSubjectIdRef(sid)),
@@ -231,6 +273,28 @@ export const computeTeacherHours = (teacher: any, subjects: any[]): HoursSummary
             day: times.day,
             start: timeToMinutes(times.start),
             end: timeToMinutes(times.end),
+        });
+    });
+
+    (teacher?.custom_timeblocks || []).forEach((tb: any) => {
+        const times = normalizeBlockTimes(tb);
+        if (!times) return;
+        intervals.push({
+            day: times.day,
+            start: timeToMinutes(times.start),
+            end: timeToMinutes(times.end),
+        });
+    });
+
+    (meetings || []).forEach((meeting: any) => {
+        (meeting.timeblocks || []).forEach((tb: any) => {
+            const times = normalizeBlockTimes(tb);
+            if (!times) return;
+            intervals.push({
+                day: times.day,
+                start: timeToMinutes(times.start),
+                end: timeToMinutes(times.end),
+            });
         });
     });
 

@@ -366,10 +366,23 @@ function Teachers() {
         setPdfExporting(true);
         setPdfProgress({ current: 0, total: sortedTeachers.length, name: '' });
         try {
+            const token = localStorage.getItem('user_token');
+            let meetings: any[] = [];
+            if (token) {
+                try {
+                    const res = await axios.get(`${API_BASE}/meeting/all_org_meetings`, {
+                        headers: { Authorization: token },
+                    });
+                    meetings = res.data || [];
+                } catch (err) {
+                    console.error('Failed to load meetings for PDF', err);
+                }
+            }
             await exportEntitiesSchedulesToPdf({
                 entities: sortedTeachers,
                 type: 'Teacher',
                 subjects: allSubjects,
+                meetings,
                 includeHours: includeHoursInPdf,
                 excludeEmptyHours: excludeEmptyHoursInPdf,
                 showEndTime: showEndTimeInPdf,

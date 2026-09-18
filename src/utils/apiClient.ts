@@ -1,7 +1,8 @@
 import axios from 'axios';
 import { subjectCacheGlobal, teacherCacheGlobal, studentCacheGlobal } from './globalCache';
 
-export const API_BASE = 'https://schedulebackendapi-3an8u.ondigitalocean.app';
+export const API_BASE =
+  process.env.REACT_APP_API_BASE || 'https://schedulebackendapi-3an8u.ondigitalocean.app';
 const DEFAULT_TTL_MS = 60 * 60 * 1000;
 const MIN_NETWORK_REFETCH_GAP_MS = 10 * 1000;
 

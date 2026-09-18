@@ -11,6 +11,28 @@ import { teacherCacheGlobal, subjectCacheGlobal } from '../utils/globalCache';
 import { usePageTitle } from '../utils/usePageTitle';
 import { exportScheduleToExcel } from '../utils/excelExport';
 import { API_BASE, getCache, loadAllSubjects, loadAllTeachers, loadStudentById, loadSubjectById, loadTeacherById, setCache } from '../utils/apiClient';
+import {
+    PREP_SUBJECT_ID,
+    PREP_DEFAULT_MINUTES,
+    PREP_COLOR,
+    OFFICE_DEFAULT_MINUTES,
+    DEFAULT_CUSTOM_COLOR,
+    DEFAULT_MEETING_COLOR,
+    isPrepBlock,
+    isMeetingBlock,
+    isCustomBlock,
+    isOfficeOwnedBlock,
+    normalizePrepTimeblock,
+    normalizeCustomTimeblock,
+    normalizeMeetingTimeblock,
+    prepPayloadFromTimeblocks,
+    customPayloadFromTimeblocks,
+    meetingTimeblockPayload,
+    getMeetingIdFromBlock,
+    getTemplateIdFromBlock,
+    customSubjectId,
+    meetingSubjectId,
+} from '../utils/officeBlocks';
 
 const spin = keyframes`
   from { transform: rotate(0deg); }
@@ -98,43 +120,12 @@ const getOrCreateTimeblockId = (tb: any): string => {
     return `tb_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 };
 
-export const PREP_SUBJECT_ID = '__prep__';
-export const PREP_DEFAULT_MINUTES = 35;
-export const PREP_RATIO = 0.2;
-export const PREP_COLOR = '#9ec9db';
-
-const isPrepBlock = (block: any): boolean =>
-    !!block?.isPrep || block?.subjectId === PREP_SUBJECT_ID;
-
-const normalizePrepTimeblock = (tb: any) => {
-    const start = tb?.start
-        ? { day: tb.start.day, time: tb.start.time }
-        : { day: tb.startday, time: tb.starttime };
-    const end = tb?.end
-        ? { day: tb.end.day, time: tb.end.time }
-        : { day: tb.endday, time: tb.endtime };
-    const timeblockId = getTimeblockId(tb) || getOrCreateTimeblockId(tb);
-    return {
-        subjectId: PREP_SUBJECT_ID,
-        isPrep: true,
-        start,
-        end,
-        timeblockId,
-        blockid: timeblockId,
-        color: PREP_COLOR,
-        name: 'Prep',
-        displayclass: '',
-    };
-};
-
-const prepPayloadFromTimeblocks = (blocks: any[]) =>
-    blocks.filter(isPrepBlock).map((tb) => ({
-        startday: tb.start.day,
-        starttime: tb.start.time,
-        endday: tb.end.day,
-        endtime: tb.end.time,
-        blockid: getOrCreateTimeblockId(tb),
-    }));
+export {
+    PREP_SUBJECT_ID,
+    PREP_DEFAULT_MINUTES,
+    PREP_RATIO,
+    PREP_COLOR,
+} from '../utils/officeBlocks';
 
 const getRequiredOverrideForSubject = (teacher: any, subjectId: string): any | null => {
     const overrides = teacher?.required_teach_overrides || [];
@@ -387,16 +378,21 @@ function ScheduleItem() {
     const [shiftHeld, setShiftHeld] = useState(false);
     const [cmdHeld, setCmdHeld] = useState(false);
     const [stableHoverTime, setStableHoverTime] = useState<string | null>(null);
-    const { availability, setPrepTimeblocks } = useContext(AvailabilityContext);
+    const { availability, setPrepTimeblocks, setCustomTimeblocks, setCustomBlockTemplates, setMeetings, meetings, customBlockTemplates } = useContext(AvailabilityContext);
 
     const getTeacherId = (): string =>
         String(item?._id?.$oid || item?._id || id || '');
+
+    const ensureBlockId = (tb: any) => getOrCreateTimeblockId(tb);
 
     const savePrepTimeblocks = async (nextTimeblocks: any[]) => {
         const teacherId = getTeacherId();
         const token = localStorage.getItem('user_token');
         if (!token || !teacherId) return;
-        const payload = prepPayloadFromTimeblocks(nextTimeblocks);
+        const payload = prepPayloadFromTimeblocks(nextTimeblocks).map((tb) => ({
+            ...tb,
+            blockid: tb.blockid || ensureBlockId({}),
+        }));
         await axios.put(
             `${API_BASE}/teacher/${teacherId}/update`,
             { prep_timeblocks: payload },
@@ -405,6 +401,80 @@ function ScheduleItem() {
         setPrepTimeblocks(payload.map(normalizePrepTimeblock));
         await updateTeacherCacheFromBackend(teacherId);
     };
+
+    const saveCustomTimeblocks = async (
+        nextTimeblocks: any[],
+        options?: { templatesOverride?: any[]; removeTemplateIfEmpty?: string }
+    ) => {
+        const teacherId = getTeacherId();
+        const token = localStorage.getItem('user_token');
+        if (!token || !teacherId) return;
+        const payload = customPayloadFromTimeblocks(nextTimeblocks).map((tb) => ({
+            ...tb,
+            blockid: tb.blockid || ensureBlockId({}),
+        }));
+        let nextTemplates = options?.templatesOverride || customBlockTemplates || [];
+        if (options?.removeTemplateIfEmpty) {
+            const stillUsed = payload.some((tb) => String(tb.template_id) === String(options.removeTemplateIfEmpty));
+            if (!stillUsed) {
+                nextTemplates = nextTemplates.filter(
+                    (t: any) => String(t.template_id) !== String(options.removeTemplateIfEmpty)
+                );
+            }
+        }
+        await axios.put(
+            `${API_BASE}/teacher/${teacherId}/update`,
+            {
+                custom_timeblocks: payload,
+                custom_block_templates: nextTemplates,
+            },
+            { headers: { Authorization: token } }
+        );
+        setCustomTimeblocks(payload);
+        setCustomBlockTemplates(nextTemplates);
+        await updateTeacherCacheFromBackend(teacherId);
+    };
+
+    const saveMeetingTimeblocks = async (meetingId: string, nextTimeblocks: any[]) => {
+        const token = localStorage.getItem('user_token');
+        if (!token || !meetingId) return;
+        const payload = meetingTimeblockPayload(nextTimeblocks, meetingId).map((tb) => ({
+            ...tb,
+            blockid: tb.blockid || ensureBlockId({}),
+        }));
+        const res = await axios.put(
+            `${API_BASE}/meeting/${meetingId}/update`,
+            { timeblocks: payload },
+            { headers: { Authorization: token } }
+        );
+        const updated = res.data?.meeting;
+        if (updated) {
+            const list = meetings || [];
+            const mid = String(updated._id?.$oid || updated._id || updated.id);
+            const exists = list.some((m) => String(m._id?.$oid || m._id || m.id) === mid);
+            setMeetings(
+                exists
+                    ? list.map((m) => (String(m._id?.$oid || m._id || m.id) === mid ? updated : m))
+                    : [updated, ...list]
+            );
+        }
+    };
+
+    const persistOfficeBlock = async (block: any, nextTimeblocks: any[], deleteOpts?: { removeTemplateIfEmpty?: string }) => {
+        if (isPrepBlock(block)) {
+            await savePrepTimeblocks(nextTimeblocks);
+            return;
+        }
+        if (isCustomBlock(block)) {
+            await saveCustomTimeblocks(nextTimeblocks, deleteOpts);
+            return;
+        }
+        if (isMeetingBlock(block)) {
+            await saveMeetingTimeblocks(getMeetingIdFromBlock(block), nextTimeblocks);
+            return;
+        }
+    };
+
     const [draggedTeacherBusy, setDraggedTeacherBusy] = useState<TimeBlock[]>([]);
     const [overlappingTeacherSchedules, setOverlappingTeacherSchedules] = useState<any[]>([]);
     const [swapReplaceHover, setSwapReplaceHover] = useState<{
@@ -585,23 +655,32 @@ function ScheduleItem() {
     };
 
     const fetchOverlappingTeacherSchedules = async (subject: any) => {
-        if (item?.type !== "Student" || !subject.teachers?.length) {
-            setOverlappingTeacherSchedules([]);
-            return;
-        }
-        // Use global cache
         const allTeachers = teacherCacheGlobal.current;
         const allSubjects = subjectCacheGlobal.current;
         if (!allTeachers || !allSubjects) { setOverlappingTeacherSchedules([]); return; }
-        const subjectTeacherNames = subject.teachers;
-        const matched = (allTeachers ?? []).filter((t: any) =>
-            subjectTeacherNames.includes(t.displayname) ||
-            subjectTeacherNames.includes(t.name)
-        );
+
+        let matched: any[] = [];
+        if (item?.type === "Student" && subject?.teachers?.length) {
+            const subjectTeacherNames = subject.teachers;
+            matched = (allTeachers ?? []).filter((t: any) =>
+                subjectTeacherNames.includes(t.displayname) ||
+                subjectTeacherNames.includes(t.name)
+            );
+        } else if (item?.type === "Teacher" && (subject?.isMeeting || subject?.teacherIds?.length)) {
+            const ids = new Set((subject.teacherIds || []).map(String));
+            const currentId = getTeacherId();
+            matched = (allTeachers ?? []).filter((t: any) => {
+                const tid = String(t._id?.$oid || t._id);
+                return ids.has(tid) && tid !== currentId;
+            });
+        } else {
+            setOverlappingTeacherSchedules([]);
+            return;
+        }
+
         const seenBlocks = new Set();
         const overlappingBlocks: any[] = [];
         for (const teacher of matched) {
-            // Get teacher's schedule by filtering cached subjects
             const requiredSet = new Set((teacher.required_teach || []).map((sid: any) => sid.$oid || sid));
             const subjectIdSet = new Set(
                 [...(teacher.required_teach || []), ...(teacher.can_teach || [])].map(sid => sid.$oid || sid)
@@ -615,7 +694,6 @@ function ScheduleItem() {
                     if (requiredSet.has(subjId) && !isTeacherAssignedForSubjectBlock(teacher, String(subjId), tbId)) {
                         return;
                     }
-                    // Use a unique key for each block: subjectId|day|start|end
                     const key = `${subj._id.$oid || subj._id}|${tbId}`;
                     if (!seenBlocks.has(key)) {
                         seenBlocks.add(key);
@@ -625,13 +703,30 @@ function ScheduleItem() {
                             timeblockId: tbId,
                             color: subj.color,
                             name: subj.displayname || subj.name,
-                            displayclass: subj.displayclass, // ensure displayclass is included
+                            displayclass: subj.displayclass,
                             teacherName: teacher.displayname || teacher.name,
                             opacity: 0.5
                         });
                     }
                 });
             }
+            // Include prep/custom from teacher cache for meeting CMD preview
+            (teacher.prep_timeblocks || []).forEach((tb: any) => {
+                const n = normalizePrepTimeblock(tb);
+                const key = `prep|${teacher._id?.$oid || teacher._id}|${n.timeblockId || n.start?.time}`;
+                if (!seenBlocks.has(key)) {
+                    seenBlocks.add(key);
+                    overlappingBlocks.push({ ...n, teacherName: teacher.displayname || teacher.name, opacity: 0.5 });
+                }
+            });
+            (teacher.custom_timeblocks || []).forEach((tb: any) => {
+                const n = normalizeCustomTimeblock(tb);
+                const key = `custom|${teacher._id?.$oid || teacher._id}|${n.timeblockId || n.start?.time}`;
+                if (!seenBlocks.has(key)) {
+                    seenBlocks.add(key);
+                    overlappingBlocks.push({ ...n, teacherName: teacher.displayname || teacher.name, opacity: 0.5 });
+                }
+            });
         }
         setOverlappingTeacherSchedules(overlappingBlocks);
     };
@@ -661,13 +756,13 @@ function ScheduleItem() {
         try {
             await executePutWithSaving(async () => {
                 const persistSide = async (block: any) => {
-                    if (isPrepBlock(block)) {
-                        await savePrepTimeblocks(newTimeblocks);
+                    if (isOfficeOwnedBlock(block)) {
+                        await persistOfficeBlock(block, newTimeblocks);
                         return;
                     }
                     await axios.put(`${API_BASE}/subject/${block.subjectId}/update`, {
                         timeblocks: newTimeblocks
-                            .filter(tb => tb.subjectId === block.subjectId && !isPrepBlock(tb))
+                            .filter(tb => tb.subjectId === block.subjectId && !isOfficeOwnedBlock(tb))
                             .map(tb => ({
                                 startday: tb.start.day,
                                 starttime: tb.start.time,
@@ -681,11 +776,11 @@ function ScheduleItem() {
                 await persistSide(draggedBlock);
                 if (
                     draggedBlock.subjectId !== targetBlock.subjectId ||
-                    isPrepBlock(draggedBlock) !== isPrepBlock(targetBlock)
+                    isOfficeOwnedBlock(draggedBlock) !== isOfficeOwnedBlock(targetBlock)
                 ) {
                     await persistSide(targetBlock);
                 }
-            }, [draggedBlock.subjectId, targetBlock.subjectId].filter((sid) => sid && sid !== PREP_SUBJECT_ID));
+            }, [draggedBlock.subjectId, targetBlock.subjectId].filter((sid) => sid && !String(sid).startsWith('__')));
         } catch (err) {
             console.error("❌ Failed to swap blocks:", err);
             // Revert on error
@@ -724,12 +819,14 @@ function ScheduleItem() {
         try {
             await executePutWithSaving(async () => {
                 const persistSide = async (block: any) => {
-                    if (isPrepBlock(block)) {
-                        await savePrepTimeblocks(newTimeblocks);
+                    if (isOfficeOwnedBlock(block)) {
+                        await persistOfficeBlock(block, newTimeblocks, {
+                            removeTemplateIfEmpty: isCustomBlock(block) ? getTemplateIdFromBlock(block) : undefined,
+                        });
                         return;
                     }
                     const subjectBlocks = newTimeblocks
-                        .filter(tb => tb.subjectId === block.subjectId && !isPrepBlock(tb))
+                        .filter(tb => tb.subjectId === block.subjectId && !isOfficeOwnedBlock(tb))
                         .map(tb => ({
                             startday: tb.start.day,
                             starttime: tb.start.time,
@@ -745,7 +842,7 @@ function ScheduleItem() {
                 await persistSide(draggedBlock);
                 if (
                     draggedBlock.subjectId !== targetBlock.subjectId ||
-                    isPrepBlock(draggedBlock) !== isPrepBlock(targetBlock)
+                    isOfficeOwnedBlock(draggedBlock) !== isOfficeOwnedBlock(targetBlock)
                 ) {
                     await persistSide(targetBlock);
                 }
@@ -782,10 +879,12 @@ function ScheduleItem() {
 
     // Handle Cmd key changes for overlapping teacher schedules
     useEffect(() => {
-        if (cmdHeld && hoverSubject && item?.type === "Student") {
-            // Use a more efficient approach - don't block the UI
+        const canOverlay =
+            (item?.type === "Student" && hoverSubject) ||
+            (item?.type === "Teacher" && hoverSubject && (hoverSubject.isMeeting || hoverSubject.teacherIds?.length));
+        if (cmdHeld && canOverlay) {
             setTimeout(() => {
-                if (cmdHeld && hoverSubject) { // Double check in case state changed
+                if (cmdHeld && hoverSubject) {
                     fetchOverlappingTeacherSchedules(hoverSubject);
                 }
             }, 0);
@@ -845,12 +944,12 @@ function ScheduleItem() {
             // 3) Prepare payload for only this subject’s blocks
             const mutated = newTimeblocks[blockIndex];
             try {
-                if (isPrepBlock(mutated)) {
-                    await savePrepTimeblocks(newTimeblocks);
+                if (isOfficeOwnedBlock(mutated)) {
+                    await persistOfficeBlock(mutated, newTimeblocks);
                 } else {
                     const subjectId = mutated.subjectId;
                     const payloadBlocks = newTimeblocks
-                        .filter(tb => tb.subjectId === subjectId && !isPrepBlock(tb))
+                        .filter(tb => tb.subjectId === subjectId && !isOfficeOwnedBlock(tb))
                         .map(tb => ({
                             startday:  tb.start.day,
                             starttime: tb.start.time,
@@ -984,16 +1083,18 @@ function ScheduleItem() {
                 setSelectedBlockIndex(null);
 
                 try {
-                    if (isPrepBlock(block)) {
+                    if (isOfficeOwnedBlock(block)) {
                         await executePutWithSaving(async () => {
-                            await savePrepTimeblocks(newTimeblocks);
+                            await persistOfficeBlock(block, newTimeblocks, {
+                                removeTemplateIfEmpty: isCustomBlock(block) ? getTemplateIdFromBlock(block) : undefined,
+                            });
                         });
                     } else {
                         await executePutWithSaving(async () => {
                             await axios.put(`${API_BASE}/subject/${subjectId}/update`, {
                             // only send *that* subject’s updated blocks
                             timeblocks: newTimeblocks
-                                .filter(tb => tb.subjectId === subjectId && !isPrepBlock(tb))
+                                .filter(tb => tb.subjectId === subjectId && !isOfficeOwnedBlock(tb))
                                 .map(tb => ({
                                     startday: tb.start.day,
                                     starttime: tb.start.time,
@@ -1031,6 +1132,37 @@ function ScheduleItem() {
         window.addEventListener("clearDragPreview", handler);
         return () => window.removeEventListener("clearDragPreview", handler);
     }, []);
+    useEffect(() => {
+        const onMeetingDeleted = (e: Event) => {
+            const meetingId = String((e as CustomEvent).detail?.meetingId || '');
+            if (!meetingId) return;
+            setTimeblocks((prev) => prev.filter((tb) => !(isMeetingBlock(tb) && getMeetingIdFromBlock(tb) === meetingId)));
+        };
+        const onTemplateDeleted = (e: Event) => {
+            const templateId = String((e as CustomEvent).detail?.templateId || '');
+            if (!templateId) return;
+            setTimeblocks((prev) => {
+                const next = prev.filter((tb) => !(isCustomBlock(tb) && getTemplateIdFromBlock(tb) === templateId));
+                const token = localStorage.getItem('user_token');
+                const teacherId = String(item?._id?.$oid || item?._id || id || '');
+                if (token && teacherId) {
+                    const payload = customPayloadFromTimeblocks(next);
+                    axios.put(
+                        `${API_BASE}/teacher/${teacherId}/update`,
+                        { custom_timeblocks: payload },
+                        { headers: { Authorization: token } }
+                    ).then(() => setCustomTimeblocks(payload)).catch(console.error);
+                }
+                return next;
+            });
+        };
+        window.addEventListener('officeMeetingDeleted', onMeetingDeleted as EventListener);
+        window.addEventListener('officeCustomTemplateDeleted', onTemplateDeleted as EventListener);
+        return () => {
+            window.removeEventListener('officeMeetingDeleted', onMeetingDeleted as EventListener);
+            window.removeEventListener('officeCustomTemplateDeleted', onTemplateDeleted as EventListener);
+        };
+    }, [item, id]);
     useEffect(() => {
         const onDragEnd = () => setAdvancedDropTarget(null);
         window.addEventListener('dragend', onDragEnd);
@@ -1079,14 +1211,61 @@ function ScheduleItem() {
                 const teacher = await loadTeacherById(token, id, { allow404: true });
                 if (teacher) {
                     setItem({ type: "Teacher", ...teacher });
-                    const normalizedPrep = (teacher.prep_timeblocks || []).map(normalizePrepTimeblock);
+                    const normalizedPrep = (teacher.prep_timeblocks || []).map((tb: any) => {
+                        const n = normalizePrepTimeblock(tb);
+                        if (!n.timeblockId) {
+                            const tid = getOrCreateTimeblockId(tb);
+                            return { ...n, timeblockId: tid, blockid: tid };
+                        }
+                        return n;
+                    });
                     setPrepTimeblocks(normalizedPrep);
+
+                    const normalizedCustom = (teacher.custom_timeblocks || []).map((tb: any) => {
+                        const n = normalizeCustomTimeblock(tb);
+                        if (!n.timeblockId) {
+                            const tid = getOrCreateTimeblockId(tb);
+                            return { ...n, timeblockId: tid, blockid: tid };
+                        }
+                        return n;
+                    });
+                    setCustomTimeblocks(teacher.custom_timeblocks || []);
+                    setCustomBlockTemplates(
+                        (teacher.custom_block_templates || []).map((t: any) => ({
+                            template_id: String(t.template_id || ''),
+                            name: t.name || 'Note',
+                            color: t.color || DEFAULT_CUSTOM_COLOR,
+                        })).filter((t: any) => t.template_id)
+                    );
+
+                    let meetingBlocks: any[] = [];
+                    try {
+                        const meetingsRes = await axios.get(`${API_BASE}/meeting/for_teacher/${id}`, {
+                            headers: { Authorization: token },
+                        });
+                        const teacherMeetings = meetingsRes.data || [];
+                        setMeetings(teacherMeetings);
+                        for (const meeting of teacherMeetings) {
+                            for (const tb of (meeting.timeblocks || [])) {
+                                const n = normalizeMeetingTimeblock(meeting, tb);
+                                if (!n.timeblockId) {
+                                    const tid = getOrCreateTimeblockId(tb);
+                                    meetingBlocks.push({ ...n, timeblockId: tid, blockid: tid });
+                                } else {
+                                    meetingBlocks.push(n);
+                                }
+                            }
+                        }
+                    } catch (err) {
+                        console.error('Failed to load meetings', err);
+                        setMeetings([]);
+                    }
 
                     const subjectIdSet = new Set(
                         [...(teacher.required_teach || []), ...(teacher.can_teach || [])].map((sid: any) => sid.$oid || sid)
                     );
                     const uniqueSubjectIds = Array.from(subjectIdSet);
-                    let blocks: any[] = [...normalizedPrep];
+                    let blocks: any[] = [...normalizedPrep, ...normalizedCustom, ...meetingBlocks];
                     if (uniqueSubjectIds.length > 0) {
                         const batchRes = await axios.post(`${API_BASE}/subject/batch`, { ids: uniqueSubjectIds }, {
                             headers: { Authorization: token }
@@ -2122,16 +2301,16 @@ function ScheduleItem() {
             setTimeblocks(newTimeblocks);
 
             try {
-                if (isPrepBlock(block)) {
+                if (isOfficeOwnedBlock(block)) {
                     await executePutWithSaving(async () => {
-                        await savePrepTimeblocks(newTimeblocks);
+                        await persistOfficeBlock(block, newTimeblocks);
                     });
                 } else {
                     const token = localStorage.getItem("user_token");
                     await executePutWithSaving(async () => {
                         await axios.put(`${API_BASE}/subject/${subjectId}/update`, {
                             timeblocks: newTimeblocks
-                                .filter(tb => tb.subjectId === subjectId && !isPrepBlock(tb))
+                                .filter(tb => tb.subjectId === subjectId && !isOfficeOwnedBlock(tb))
                                 .map(tb => ({
                                     startday: tb.start.day,
                                     starttime: tb.start.time,
@@ -2164,6 +2343,11 @@ function ScheduleItem() {
                 start: { day, time },
                 end: { day, time: endTime },
             });
+            if (!newBlock.timeblockId) {
+                const tid = getOrCreateTimeblockId({});
+                newBlock.timeblockId = tid;
+                newBlock.blockid = tid;
+            }
             const newTimeblocks = [...timeblocks, newBlock];
             setTimeblocks(newTimeblocks);
             try {
@@ -2173,6 +2357,77 @@ function ScheduleItem() {
                 setDragHover(null);
             } catch (err) {
                 console.error("Prep drop failed:", err);
+                setTimeblocks(timeblocks);
+            }
+            return;
+        }
+
+        // New meeting block on teacher schedule
+        const dragged = getDraggedSubjectData();
+        if (dragged?.isMeeting || String(subjectId || '').startsWith('__meeting__')) {
+            if (item?.type !== "Teacher") return;
+            const meetingId = String(dragged?.meetingId || e.dataTransfer.getData('meeting_id') || getMeetingIdFromBlock({ subjectId }));
+            if (!meetingId) return;
+            const startMin = timeToMinutes(time);
+            const endTime = minutesToTime(startMin + OFFICE_DEFAULT_MINUTES);
+            const tid = getOrCreateTimeblockId({});
+            const newBlock = {
+                subjectId: meetingSubjectId(meetingId),
+                isMeeting: true,
+                meetingId,
+                start: { day, time },
+                end: { day, time: endTime },
+                timeblockId: tid,
+                blockid: tid,
+                color: dragged?.color || DEFAULT_MEETING_COLOR,
+                name: dragged?.name || 'Meeting',
+                teachers: dragged?.teachers || [],
+                teacherIds: dragged?.teacherIds || [],
+                displayclass: '',
+            };
+            const newTimeblocks = [...timeblocks, newBlock];
+            setTimeblocks(newTimeblocks);
+            try {
+                await executePutWithSaving(async () => {
+                    await saveMeetingTimeblocks(meetingId, newTimeblocks);
+                });
+                setDragHover(null);
+            } catch (err) {
+                console.error("Meeting drop failed:", err);
+                setTimeblocks(timeblocks);
+            }
+            return;
+        }
+
+        // New custom block on teacher schedule
+        if (dragged?.isCustom || String(subjectId || '').startsWith('__custom__')) {
+            if (item?.type !== "Teacher") return;
+            const templateId = String(dragged?.templateId || e.dataTransfer.getData('template_id') || getTemplateIdFromBlock({ subjectId }));
+            if (!templateId) return;
+            const startMin = timeToMinutes(time);
+            const endTime = minutesToTime(startMin + OFFICE_DEFAULT_MINUTES);
+            const tid = getOrCreateTimeblockId({});
+            const newBlock = {
+                subjectId: customSubjectId(templateId),
+                isCustom: true,
+                templateId,
+                start: { day, time },
+                end: { day, time: endTime },
+                timeblockId: tid,
+                blockid: tid,
+                color: dragged?.color || DEFAULT_CUSTOM_COLOR,
+                name: dragged?.name || 'Note',
+                displayclass: '',
+            };
+            const newTimeblocks = [...timeblocks, newBlock];
+            setTimeblocks(newTimeblocks);
+            try {
+                await executePutWithSaving(async () => {
+                    await saveCustomTimeblocks(newTimeblocks);
+                });
+                setDragHover(null);
+            } catch (err) {
+                console.error("Custom drop failed:", err);
                 setTimeblocks(timeblocks);
             }
             return;
@@ -2720,6 +2975,11 @@ function ScheduleItem() {
                                         <VStack spacing={0} pointerEvents="none" sx={{ '& *': { pointerEvents: 'none' } }} w="100%" maxW="100%" maxH="100%" overflow="hidden" align="stretch">
                                             <Box>{cropSemesterTag(block.name)}</Box>
                                             {item.type === "Teacher" && block.displayclass && <Box fontWeight="normal" fontSize="sm">{cropSemesterTag(block.displayclass)}</Box>}
+                                            {item.type === "Teacher" && isMeetingBlock(block) && block.teachers?.length > 0 && (
+                                                <Box fontWeight="normal" fontSize="sm">
+                                                    {block.teachers.map((t: string) => cropSemesterTag(t)).join(", ")}
+                                                </Box>
+                                            )}
                                             {item.type === "Student" && !hideTeacherNames && block.teachers?.length > 0 && <Box fontWeight="normal" fontSize="sm">{block.teachers.map((t: string, idx: number) => cropSemesterTag(t)).join(", ")}</Box>}
                                         </VStack>
                                     </ScaleToFitCell>
@@ -3006,6 +3266,11 @@ function ScheduleItem() {
                                     <Box>{cropSemesterTag(block.name)}</Box>
                                     {item.type === "Teacher" && block.displayclass && (
                                         <Box fontWeight="normal" fontSize="sm">{cropSemesterTag(block.displayclass)}</Box>
+                                    )}
+                                    {item.type === "Teacher" && isMeetingBlock(block) && block.teachers?.length > 0 && (
+                                        <Box fontWeight="normal" fontSize="sm">
+                                            {block.teachers.map((t: string) => cropSemesterTag(t)).join(", ")}
+                                        </Box>
                                     )}
                                     {item.type === "Student" && !hideTeacherNames && block.teachers?.length > 0 && (
                                         <Box fontWeight="normal" fontSize="sm">
@@ -3331,6 +3596,11 @@ function ScheduleItem() {
                                 {item?.type === "Teacher" && block.displayclass && (
                                     <Box fontSize="xs" color="gray.600">{cropSemesterTag(block.displayclass)}</Box>
                                 )}
+                                {item?.type === "Teacher" && isMeetingBlock(block) && block.teachers?.length > 0 && (
+                                    <Box fontSize="xs" color="gray.600">
+                                        {block.teachers.map((t: string) => cropSemesterTag(t)).join(", ")}
+                                    </Box>
+                                )}
                                 {item?.type === "Student" && (() => {
                                     const subjectId = getSubjectIdRef(block.subjectId);
                                     const blockId = getTimeblockId(block) || getOrCreateTimeblockId(block);
@@ -3463,12 +3733,12 @@ function ScheduleItem() {
                                             try {
                                                 await executePutWithSaving(async () => {
                                                     if (hasTimeChanged) {
-                                                        if (isPrepBlock(block)) {
-                                                            await savePrepTimeblocks(newTimeblocks);
+                                                        if (isOfficeOwnedBlock(block)) {
+                                                            await persistOfficeBlock(block, newTimeblocks);
                                                         } else {
                                                             await axios.put(`${API_BASE}/subject/${block.subjectId}/update`, {
                                                                 timeblocks: newTimeblocks
-                                                                    .filter(tb => tb.subjectId === block.subjectId && !isPrepBlock(tb))
+                                                                    .filter(tb => tb.subjectId === block.subjectId && !isOfficeOwnedBlock(tb))
                                                                     .map(tb => ({
                                                                         startday: tb.start.day,
                                                                         starttime: tb.start.time,
@@ -3540,7 +3810,7 @@ function ScheduleItem() {
                                                         });
                                                         touchedSubjectIds.forEach((sid) => refreshSubjectTeacherNames(sid));
                                                     }
-                                                }, isPrepBlock(block) ? undefined : touchedSubjectIds.filter((sid) => sid !== PREP_SUBJECT_ID));
+                                                }, isOfficeOwnedBlock(block) ? undefined : touchedSubjectIds.filter((sid) => !String(sid).startsWith('__')));
 
                                                 setPendingCheckboxUpdates((prev) => {
                                                     const next = { ...prev };

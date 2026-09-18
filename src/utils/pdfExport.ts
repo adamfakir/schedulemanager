@@ -208,6 +208,9 @@ const blockSubtitle = (
     type: 'Student' | 'Teacher',
     hideTeacherNames: boolean
 ): string => {
+    if (type === 'Teacher' && block.isMeeting && block.teachers?.length) {
+        return block.teachers.map(cropSemesterTag).join(', ');
+    }
     if (type === 'Teacher' && block.displayclass) {
         return cropSemesterTag(block.displayclass);
     }
@@ -355,7 +358,7 @@ const drawHoursPanel = (
     ctx.fillStyle = '#4a5568';
     ctx.fillText(
         excludeEmpty
-            ? 'Classes + prep only'
+            ? 'Classes + office only'
             : `Filled ${formatHoursLabel(hours.totalFilled)} · Empty ${formatHoursLabel(hours.totalEmpty)}`,
         x + 10,
         cy + 50
@@ -654,6 +657,7 @@ export async function exportEntitiesSchedulesToPdf(params: {
     type: 'Student' | 'Teacher';
     subjects: any[];
     teachers?: any[];
+    meetings?: any[];
     includeHours?: boolean;
     excludeEmptyHours?: boolean;
     hideTeacherNames?: boolean;
@@ -666,6 +670,7 @@ export async function exportEntitiesSchedulesToPdf(params: {
         type,
         subjects,
         teachers = [],
+        meetings = [],
         includeHours = false,
         excludeEmptyHours = false,
         hideTeacherNames = false,
@@ -691,12 +696,23 @@ export async function exportEntitiesSchedulesToPdf(params: {
         const name = entity.displayname || entity.name || 'Untitled';
         onProgress?.({ current: i + 1, total: entities.length, name });
 
+        const entityId = String(entity?._id?.$oid || entity?._id || '');
+        const entityMeetings =
+            type === 'Teacher'
+                ? (meetings || []).filter((m: any) =>
+                      (m.teacher_ids || []).map(String).includes(entityId)
+                  )
+                : [];
+
         const blocks =
             type === 'Student'
                 ? buildStudentScheduleBlocks(entity, subjects, teachers)
-                : buildTeacherScheduleBlocks(entity, subjects);
+                : buildTeacherScheduleBlocks(entity, subjects, entityMeetings);
 
-        const hours = type === 'Teacher' && includeHours ? computeTeacherHours(entity, subjects) : null;
+        const hours =
+            type === 'Teacher' && includeHours
+                ? computeTeacherHours(entity, subjects, entityMeetings)
+                : null;
 
         const canvas = renderScheduleCanvas({
             type,

@@ -7,7 +7,7 @@ import { usePageTitle } from '../utils/usePageTitle';
 // Inside your component:
 
 // src/Login.tsx
-const API_BASE = "https://schedulebackendapi-3an8u.ondigitalocean.app";
+import { API_BASE } from '../utils/apiClient';
 function Login() {
     // Set page title
     usePageTitle('Login - Schedule Manager');
