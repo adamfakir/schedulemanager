@@ -33,6 +33,7 @@ import {
     meetingSubjectId,
     customSubjectId,
 } from '../utils/officeBlocks';
+import ScheduleEditPanel from './ScheduleEditPanel';
 
 const Navbar = () => {
     const navigate = useNavigate();
@@ -304,7 +305,16 @@ const Navbar = () => {
 
             const subjectData = await loadSubjectById(token, id, { allow404: true });
             if (!active) return;
-            setScheduleType(subjectData ? "Subject" : null);
+            if (subjectData) {
+                setItem({ type: 'Subject', ...subjectData });
+                setScheduleType('Subject');
+                const [subjectsList] = await Promise.all([subjectsPromise]);
+                if (!active) return;
+                setSubjects(subjectsList || []);
+                return;
+            }
+            setScheduleType(null);
+            setItem(null);
         };
 
         fetchTypeAndSubjects();
@@ -422,6 +432,7 @@ const Navbar = () => {
                         <TabList overflowX="auto" whiteSpace="nowrap">
                             <Tab flex="none">Subjects</Tab>
                             <Tab flex="none">Classmates</Tab>
+                            <Tab flex="none">Edit</Tab>
                         </TabList>
                         <TabPanels>
                             <TabPanel px={1}>
@@ -606,6 +617,16 @@ const Navbar = () => {
                                         })}
                                 </VStack>
                             </TabPanel>
+                            <TabPanel px={1}>
+                                {item && (
+                                    <ScheduleEditPanel
+                                        type="Student"
+                                        item={item}
+                                        subjects={subjects}
+                                        onSaved={(updated) => setItem({ ...updated, type: 'Student' })}
+                                    />
+                                )}
+                            </TabPanel>
                         </TabPanels>
                     </Tabs>
                 )}
@@ -628,6 +649,7 @@ const Navbar = () => {
                                     <Tab flex="none">Subjects</Tab>
                                     <Tab flex="none">Office</Tab>
                                     <Tab flex="none">Hours</Tab>
+                                    <Tab flex="none">Edit</Tab>
                             </TabList>
 
                             <TabPanels flex="1" minH={0} overflow="hidden">
@@ -1709,10 +1731,44 @@ const Navbar = () => {
                                         })()}
                                     </VStack>
                                 </TabPanel>
+
+                                <TabPanel px={1} h="100%" overflowY="auto" pb={4}>
+                                    {item && (
+                                        <ScheduleEditPanel
+                                            type="Teacher"
+                                            item={item}
+                                            subjects={subjects}
+                                            onSaved={(updated) => setItem({ ...updated, type: 'Teacher' })}
+                                        />
+                                    )}
+                                </TabPanel>
                             </TabPanels>
                         </Tabs>
                     );
                 })()}
+                {scheduleType === "Subject" && item && (
+                    <Tabs mt={4} variant="enclosed" w="100%" flex="1" minH={0} display="flex" flexDirection="column" overflow="hidden"
+                        sx={{
+                            '.chakra-tabs__tab-panels': { flex: 1, minHeight: 0, overflow: 'hidden' },
+                            '.chakra-tabs__tab-panel[hidden]': { display: 'none' },
+                            '.chakra-tabs__tab-panel:not([hidden])': { height: '100%', overflowY: 'auto' },
+                        }}
+                    >
+                        <TabList overflowX="auto" whiteSpace="nowrap" flexShrink={0}>
+                            <Tab flex="none">Edit</Tab>
+                        </TabList>
+                        <TabPanels flex="1" minH={0} overflow="hidden">
+                            <TabPanel px={1} h="100%" overflowY="auto" pb={4}>
+                                <ScheduleEditPanel
+                                    type="Subject"
+                                    item={item}
+                                    subjects={subjects}
+                                    onSaved={(updated) => setItem({ ...updated, type: 'Subject' })}
+                                />
+                            </TabPanel>
+                        </TabPanels>
+                    </Tabs>
+                )}
             </Flex>
         );
     }else{

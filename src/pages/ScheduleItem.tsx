@@ -860,6 +860,7 @@ function ScheduleItem() {
         index: number;
         start: string;
         end: string;
+        displayclass?: string;
     } | null>(null);
     // ↪️ near top of ScheduleItem()
     const stableSortedTimesRef = useRef<string[]>([]);
@@ -1185,10 +1186,19 @@ function ScheduleItem() {
         window.addEventListener('officeMeetingDeleted', onMeetingDeleted as EventListener);
         window.addEventListener('officeMeetingUpdated', onMeetingUpdated as EventListener);
         window.addEventListener('officeCustomTemplateDeleted', onTemplateDeleted as EventListener);
+        const onEntityUpdated = (e: Event) => {
+            const detail = (e as CustomEvent).detail || {};
+            const updatedId = String(detail.id || '');
+            if (updatedId && updatedId === String(id)) {
+                setRefreshTrigger((t) => t + 1);
+            }
+        };
+        window.addEventListener('scheduleEntityUpdated', onEntityUpdated as EventListener);
         return () => {
             window.removeEventListener('officeMeetingDeleted', onMeetingDeleted as EventListener);
             window.removeEventListener('officeMeetingUpdated', onMeetingUpdated as EventListener);
             window.removeEventListener('officeCustomTemplateDeleted', onTemplateDeleted as EventListener);
+            window.removeEventListener('scheduleEntityUpdated', onEntityUpdated as EventListener);
         };
     }, [item, id]);
     useEffect(() => {
@@ -1300,6 +1310,7 @@ function ScheduleItem() {
                         });
                         const subjects = batchRes.data;
                         const requiredSet = new Set((teacher.required_teach || []).map((sid: any) => sid.$oid || sid));
+                        const fixedLabelMap = getFixedBlockLabelMap(teacher);
                         for (const subj of subjects) {
                             (subj.timeblocks || []).forEach((tb: any) => {
                                 const tbId = getTimeblockId(tb) || getOrCreateTimeblockId(tb);
@@ -1307,13 +1318,18 @@ function ScheduleItem() {
                                 if (requiredSet.has(subjId) && !isTeacherAssignedForSubjectBlock(teacher, subjId, tbId)) {
                                     return;
                                 }
+                                const labelKey = `${subjId}|${tbId}`;
+                                const hasOverride = fixedLabelMap.has(labelKey);
                                 blocks.push({
                                     subjectId: subjId,
                                     ...tb,
                                     timeblockId: tbId,
                                     color: subj.color,
                                     name: subj.displayname,
-                                    displayclass: subj.displayclass,
+                                    displayclass: subj.fixed && hasOverride
+                                        ? fixedLabelMap.get(labelKey)
+                                        : (subj.displayclass || ''),
+                                    isFixed: !!subj.fixed,
                                 });
                             });
                         }
@@ -1878,7 +1894,47 @@ function ScheduleItem() {
             const previousBlock = timeblocks[editingBlock.index];
             discardDraftForBlock(previousBlock);
         }
-        setEditingBlock({ index, start, end });
+        const block = timeblocks[index];
+        setEditingBlock({
+            index,
+            start,
+            end,
+            displayclass: block?.displayclass || '',
+        });
+    };
+
+    const getFixedBlockLabelMap = (teacher: any): Map<string, string> => {
+        const map = new Map<string, string>();
+        for (const lb of (teacher?.fixed_block_labels || [])) {
+            const sid = getSubjectIdRef(lb?.subject);
+            const bid = String(lb?.blockid || lb?.timeblockId || '');
+            if (!sid || !bid) continue;
+            map.set(`${sid}|${bid}`, String(lb?.displayclass ?? ''));
+        }
+        return map;
+    };
+
+    const saveFixedBlockLabel = async (subjectId: string, blockId: string, displayclass: string) => {
+        const teacherId = getTeacherId();
+        const token = localStorage.getItem('user_token');
+        if (!token || !teacherId || !subjectId || !blockId) return;
+        const existing = Array.isArray(item?.fixed_block_labels) ? [...item.fixed_block_labels] : [];
+        const key = `${subjectId}|${blockId}`;
+        const next = existing
+            .map((lb: any) => ({
+                subject: getSubjectIdRef(lb?.subject),
+                blockid: String(lb?.blockid || lb?.timeblockId || ''),
+                displayclass: String(lb?.displayclass ?? ''),
+            }))
+            .filter((lb: any) => lb.subject && lb.blockid && `${lb.subject}|${lb.blockid}` !== key);
+        next.push({ subject: subjectId, blockid: blockId, displayclass });
+        await axios.put(
+            `${API_BASE}/teacher/${teacherId}/update`,
+            { fixed_block_labels: next },
+            { headers: { Authorization: token } }
+        );
+        setItem((prev: any) => (prev ? { ...prev, fixed_block_labels: next } : prev));
+        await updateTeacherCacheFromBackend(teacherId);
     };
 
     const closeEditingBlockWithoutSave = () => {
@@ -3621,7 +3677,23 @@ function ScheduleItem() {
                                         </Box>
                                     );
                                 })()}
-                                {item?.type === "Teacher" && block.displayclass && (
+                                {item?.type === "Teacher" && block.isFixed && (
+                                    <Box fontSize="xs" color="gray.700" borderTop="1px solid" borderColor="gray.200" pt={1.5}>
+                                        <Text fontWeight="semibold" mb={1} fontSize="xs">Class / student label</Text>
+                                        <Input
+                                            size="sm"
+                                            value={editingBlock.displayclass ?? ''}
+                                            placeholder="e.g. class or student name"
+                                            onChange={(e) =>
+                                                setEditingBlock({ ...editingBlock, displayclass: e.target.value })
+                                            }
+                                        />
+                                        <Text fontSize="2xs" color="gray.500" mt={1}>
+                                            Only for this teacher’s schedule (fixed periods)
+                                        </Text>
+                                    </Box>
+                                )}
+                                {item?.type === "Teacher" && !block.isFixed && block.displayclass && (
                                     <Box fontSize="xs" color="gray.600">{cropSemesterTag(block.displayclass)}</Box>
                                 )}
                                 {item?.type === "Teacher" && isMeetingBlock(block) && block.teachers?.length > 0 && (
@@ -3714,10 +3786,15 @@ function ScheduleItem() {
                                         const pendingEntriesForBlock = Object.entries(pendingCheckboxUpdatesRef.current)
                                             .filter(([key]) => key.endsWith(`|${subjectIdForBlock}|${blockIdForEdit}`));
                                         const hasTeacherChanges = pendingEntriesForBlock.length > 0;
+                                        const nextDisplayclass = editingBlock.displayclass ?? block.displayclass ?? '';
+                                        const hasFixedLabelChanged =
+                                            item?.type === 'Teacher' &&
+                                            !!block.isFixed &&
+                                            nextDisplayclass !== (block.displayclass || '');
 
                                         if (!token) return;
 
-                                        if (!hasTimeChanged && !hasTeacherChanges) {
+                                        if (!hasTimeChanged && !hasTeacherChanges && !hasFixedLabelChanged) {
                                             setEditingBlock(null);
                                             return;
                                         }
@@ -3726,6 +3803,7 @@ function ScheduleItem() {
                                             ...timeblocks[editingBlock.index],
                                             start: { ...block.start, time: editingBlock.start },
                                             end: { ...block.end, time: editingBlock.end },
+                                            ...(hasFixedLabelChanged ? { displayclass: nextDisplayclass } : {}),
                                         };
 
                                         const newTimeblocks = [...timeblocks];
@@ -3733,7 +3811,7 @@ function ScheduleItem() {
                                         const touchedSubjectIds = [subjectIdForBlock];
 
                                         // Immediate local feedback on save click.
-                                        if (hasTimeChanged) {
+                                        if (hasTimeChanged || hasFixedLabelChanged) {
                                             setTimeblocks(newTimeblocks);
                                         }
                                         if (hasTeacherChanges) {
@@ -3778,6 +3856,10 @@ function ScheduleItem() {
                                                                 headers: { Authorization: token }
                                                             });
                                                         }
+                                                    }
+
+                                                    if (hasFixedLabelChanged) {
+                                                        await saveFixedBlockLabel(subjectIdForBlock, blockIdForEdit, nextDisplayclass);
                                                     }
 
                                                     if (hasTeacherChanges) {

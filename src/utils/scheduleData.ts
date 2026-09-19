@@ -195,6 +195,14 @@ export const buildTeacherScheduleBlocks = (teacher: any, subjects: any[], meetin
         });
     });
 
+    const fixedLabelMap = new Map<string, string>();
+    for (const lb of (teacher?.fixed_block_labels || [])) {
+        const sid = getSubjectIdRef(lb?.subject);
+        const bid = String(lb?.blockid || lb?.timeblockId || '');
+        if (!sid || !bid) continue;
+        fixedLabelMap.set(`${sid}|${bid}`, String(lb?.displayclass ?? ''));
+    }
+
     subjectIdSet.forEach((subjId: string) => {
         const subj = subjectById.get(subjId);
         if (!subj) return;
@@ -205,13 +213,17 @@ export const buildTeacherScheduleBlocks = (teacher: any, subjects: any[], meetin
             }
             const times = normalizeBlockTimes(tb);
             if (!times) return;
+            const labelKey = `${subjId}|${tbId}`;
+            const hasOverride = fixedLabelMap.has(labelKey);
             blocks.push({
                 subjectId: subjId,
                 start: { day: times.day, time: times.start },
                 end: { day: times.day, time: times.end },
                 color: subj.color || '#b8b8b8',
                 name: subj.displayname || subj.name || 'Subject',
-                displayclass: subj.displayclass || '',
+                displayclass: subj.fixed && hasOverride
+                    ? (fixedLabelMap.get(labelKey) || '')
+                    : (subj.displayclass || ''),
             });
         });
     });
