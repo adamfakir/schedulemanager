@@ -35,6 +35,12 @@ import {FaThumbtack} from "react-icons/fa";
 import { useNavigate, Link } from 'react-router-dom';
 import { usePageTitle } from '../utils/usePageTitle';
 import { API_BASE, getSubjectsFromCache, getTeachersFromCache, loadAllSubjects, loadAllTeachers, loadUserSelf } from '../utils/apiClient';
+import {
+    ensureUniqueTimeblockIds,
+    getRawTimeblockId,
+    remapOverrideTimeblockIds,
+    serializeTimeblocksForApi,
+} from '../utils/timeblockIds';
 import { exportEntitiesSchedulesToPdf } from '../utils/pdfExport';
 
 interface User {
@@ -290,7 +296,7 @@ function Teachers() {
     };
 
     const toSubjectId = (raw: any): string => String(raw?.$oid || raw?.subject?.$oid || raw?.subject || raw?.id || raw || "");
-    const getTimeblockId = (tb: any): string => String(tb?.blockid || tb?.id || tb?.timeblockId || "");
+    const getTimeblockId = (tb: any): string => getRawTimeblockId(tb);
 
     const normalizeOverrides = (teacher: any) => {
         const overrides = (teacher?.required_teach_overrides || []).map((ov: any) => ({
@@ -307,6 +313,40 @@ function Teachers() {
     const getSubjectTimeblockIds = (subjectId: string): string[] => {
         const subject = allSubjects.find((s: any) => (s._id?.$oid || s._id) === subjectId);
         return (subject?.timeblocks || []).map((tb: any) => getTimeblockId(tb)).filter(Boolean);
+    };
+
+    const healSubjectTimeblocks = async (subjectId: string): Promise<void> => {
+        const subject = allSubjects.find((s: any) => (s._id?.$oid || s._id) === subjectId);
+        if (!subject) return;
+        const { timeblocks: healed, changed, remaps } = ensureUniqueTimeblockIds(subject.timeblocks || []);
+        if (!changed) return;
+
+        setAllSubjects((prev) =>
+            prev.map((s: any) => ((s._id?.$oid || s._id) === subjectId ? { ...s, timeblocks: healed } : s))
+        );
+        if (remaps.length) {
+            setCurrentTeacher((prev: any) =>
+                prev
+                    ? {
+                          ...prev,
+                          required_teach_overrides: remapOverrideTimeblockIds(normalizeOverrides(prev), remaps),
+                      }
+                    : prev
+            );
+        }
+
+        const token = localStorage.getItem('user_token');
+        if (token) {
+            try {
+                await axios.put(
+                    `${API_BASE}/subject/${subjectId}/update`,
+                    { timeblocks: serializeTimeblocksForApi(healed) },
+                    { headers: { Authorization: token } }
+                );
+            } catch (err) {
+                console.error('Failed to persist unique timeblock ids', err);
+            }
+        }
     };
 
     const isTimeblockSelected = (teacher: any, subjectId: string, blockId: string): boolean => {
@@ -879,7 +919,11 @@ function Teachers() {
                                                                     icon={isExpanded ? <ChevronUpIcon /> : <ChevronDownIcon />}
                                                                     size="xs"
                                                                     variant="ghost"
-                                                                    onClick={() => setExpandedRequiredSubjects((prevOpen) => ({ ...prevOpen, [id]: !prevOpen[id] }))}
+                                                                    onClick={async () => {
+                                                                        const opening = !isExpanded;
+                                                                        setExpandedRequiredSubjects((prevOpen) => ({ ...prevOpen, [id]: opening }));
+                                                                        if (opening) await healSubjectTimeblocks(id);
+                                                                    }}
                                                                 />
                                                             )}
                                                         </HStack>
@@ -899,10 +943,13 @@ function Teachers() {
                                                                     Green = include-all-except-unchecked. Yellow = include-only-checked.
                                                                 </Text>
                                                                 <VStack align="stretch" spacing={1} maxH="120px" overflowY="auto">
-                                                                    {timeblocks.map((tb: any, idx: number) => {
+                                                                    {(allSubjects.find((s: any) => (s._id?.$oid || s._id) === id)?.timeblocks || timeblocks).map((tb: any, idx: number) => {
                                                                         const blockId = getTimeblockId(tb);
                                                                         if (!blockId) return null;
                                                                         const selected = isTimeblockSelected(currentTeacher, id, blockId);
+                                                                        const day = tb?.start?.day || tb?.startday || '';
+                                                                        const start = tb?.start?.time || tb?.starttime || '';
+                                                                        const end = tb?.end?.time || tb?.endtime || '';
                                                                         return (
                                                                             <Switch
                                                                                 key={`${id}-tb-${blockId}-${idx}`}
@@ -911,7 +958,7 @@ function Teachers() {
                                                                                 isChecked={selected}
                                                                                 onChange={(e) => toggleSubjectTimeblock(id, blockId, e.target.checked)}
                                                                             >
-                                                                                {tb.start?.day?.slice(0, 3)} {tb.start?.time} - {tb.end?.time}
+                                                                                {String(day).slice(0, 3)} {start} - {end}
                                                                             </Switch>
                                                                         );
                                                                     })}

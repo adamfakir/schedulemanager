@@ -17,6 +17,12 @@ import { ChevronDownIcon, ChevronUpIcon, CloseIcon } from '@chakra-ui/icons';
 import axios from 'axios';
 import { API_BASE, loadAllSubjects, loadStudentById, loadSubjectById, loadTeacherById } from '../utils/apiClient';
 import { subjectCacheGlobal, teacherCacheGlobal, studentCacheGlobal } from '../utils/globalCache';
+import {
+    ensureUniqueTimeblockIds,
+    getRawTimeblockId,
+    remapOverrideTimeblockIds,
+    serializeTimeblocksForApi,
+} from '../utils/timeblockIds';
 
 type ScheduleEditType = 'Teacher' | 'Student' | 'Subject';
 
@@ -33,8 +39,7 @@ const getEntityId = (entity: any): string =>
 const toSubjectId = (raw: any): string =>
     String(raw?.$oid || raw?.subject?.$oid || raw?.subject || raw?.id || raw || '');
 
-const getTimeblockId = (tb: any): string =>
-    String(tb?.blockid || tb?.id || tb?.timeblockId || '');
+const getTimeblockId = (tb: any): string => getRawTimeblockId(tb);
 
 const normalizeTeacherDraft = (item: any) => ({
     ...item,
@@ -238,7 +243,12 @@ export default function ScheduleEditPanel({ type, item, subjects, onSaved }: Pro
     const [showMoreDPN, setShowMoreDPN] = useState(false);
     const [showMoreMPL, setShowMoreMPL] = useState(false);
     const [showMoreLPW, setShowMoreLPW] = useState(false);
+    const [localSubjects, setLocalSubjects] = useState<any[]>(subjects || []);
     const entityKey = `${type}:${getEntityId(item)}`;
+
+    useEffect(() => {
+        setLocalSubjects(subjects || []);
+    }, [subjects]);
 
     useEffect(() => {
         if (!item) {
@@ -258,12 +268,55 @@ export default function ScheduleEditPanel({ type, item, subjects, onSaved }: Pro
 
     const availableTags = useMemo(() => {
         const set = new Set<string>();
-        (subjects || []).forEach((s: any) => (s.tags || []).forEach((t: string) => set.add(t)));
+        (localSubjects || []).forEach((s: any) => (s.tags || []).forEach((t: string) => set.add(t)));
         (draft?.tags || []).forEach((t: string) => set.add(t));
         return Array.from(set).sort((a, b) => a.localeCompare(b));
-    }, [subjects, draft?.tags]);
+    }, [localSubjects, draft?.tags]);
 
-    const allSubjects = subjects || [];
+    const allSubjects = localSubjects || [];
+
+    const healSubjectTimeblocks = async (subjectId: string): Promise<any[]> => {
+        const subject = allSubjects.find((s: any) => getEntityId(s) === subjectId);
+        if (!subject) return [];
+        const { timeblocks: healed, changed, remaps } = ensureUniqueTimeblockIds(subject.timeblocks || []);
+        if (!changed) return healed;
+
+        setLocalSubjects((prev) =>
+            prev.map((s: any) => (getEntityId(s) === subjectId ? { ...s, timeblocks: healed } : s))
+        );
+        if (subjectCacheGlobal.current) {
+            subjectCacheGlobal.current = subjectCacheGlobal.current.map((s: any) =>
+                getEntityId(s) === subjectId ? { ...s, timeblocks: healed } : s
+            );
+        }
+        if (remaps.length) {
+            setDraft((prev: any) =>
+                prev
+                    ? {
+                          ...prev,
+                          required_teach_overrides: remapOverrideTimeblockIds(
+                              normalizeOverrides(prev),
+                              remaps
+                          ),
+                      }
+                    : prev
+            );
+        }
+
+        const token = localStorage.getItem('user_token');
+        if (token) {
+            try {
+                await axios.put(
+                    `${API_BASE}/subject/${subjectId}/update`,
+                    { timeblocks: serializeTimeblocksForApi(healed) },
+                    { headers: { Authorization: token } }
+                );
+            } catch (err) {
+                console.error('Failed to persist unique timeblock ids', err);
+            }
+        }
+        return healed;
+    };
 
     const normalizeOverrides = (teacher: any) =>
         (teacher?.required_teach_overrides || [])
@@ -555,12 +608,14 @@ export default function ScheduleEditPanel({ type, item, subjects, onSaved }: Pro
                                                         icon={isExpanded ? <ChevronUpIcon /> : <ChevronDownIcon />}
                                                         size="xs"
                                                         variant="ghost"
-                                                        onClick={() =>
+                                                        onClick={async () => {
+                                                            const opening = !isExpanded;
                                                             setExpandedRequiredSubjects((prevOpen) => ({
                                                                 ...prevOpen,
-                                                                [id]: !prevOpen[id],
-                                                            }))
-                                                        }
+                                                                [id]: opening,
+                                                            }));
+                                                            if (opening) await healSubjectTimeblocks(id);
+                                                        }}
                                                     />
                                                 )}
                                             </HStack>
@@ -583,10 +638,13 @@ export default function ScheduleEditPanel({ type, item, subjects, onSaved }: Pro
                                                         Green = include-all-except-unchecked. Yellow = include-only-checked.
                                                     </Text>
                                                     <VStack align="stretch" spacing={1} maxH="120px" overflowY="auto">
-                                                        {timeblocks.map((tb: any, idx: number) => {
+                                                        {(allSubjects.find((s: any) => getEntityId(s) === id)?.timeblocks || timeblocks).map((tb: any, idx: number) => {
                                                             const blockId = getTimeblockId(tb);
                                                             if (!blockId) return null;
                                                             const selected = isTimeblockSelected(draft, id, blockId);
+                                                            const day = tb?.start?.day || tb?.startday || '';
+                                                            const start = tb?.start?.time || tb?.starttime || '';
+                                                            const end = tb?.end?.time || tb?.endtime || '';
                                                             return (
                                                                 <Switch
                                                                     key={`${id}-tb-${blockId}-${idx}`}
@@ -605,7 +663,7 @@ export default function ScheduleEditPanel({ type, item, subjects, onSaved }: Pro
                                                                         setSubjectOverride(id, excludeModeNow, Array.from(selectedSet));
                                                                     }}
                                                                 >
-                                                                    {tb.start?.day?.slice(0, 3)} {tb.start?.time} - {tb.end?.time}
+                                                                    {String(day).slice(0, 3)} {start} - {end}
                                                                 </Switch>
                                                             );
                                                         })}
