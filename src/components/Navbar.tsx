@@ -55,6 +55,12 @@ const Navbar = () => {
     const [meetingColor, setMeetingColor] = useState(DEFAULT_MEETING_COLOR);
     const [meetingTeacherIds, setMeetingTeacherIds] = useState<string[]>([]);
     const [meetingTeacherSearch, setMeetingTeacherSearch] = useState('');
+    const [editingMeetingId, setEditingMeetingId] = useState<string | null>(null);
+    const [editMeetingName, setEditMeetingName] = useState('');
+    const [editMeetingColor, setEditMeetingColor] = useState(DEFAULT_MEETING_COLOR);
+    const [editMeetingTeacherIds, setEditMeetingTeacherIds] = useState<string[]>([]);
+    const [editMeetingSearch, setEditMeetingSearch] = useState('');
+    const [savingMeetingEdit, setSavingMeetingEdit] = useState(false);
     const [customDraftName, setCustomDraftName] = useState('');
     const [customDraftColor, setCustomDraftColor] = useState(DEFAULT_CUSTOM_COLOR);
     const [creatingMeeting, setCreatingMeeting] = useState(false);
@@ -1032,9 +1038,70 @@ const Navbar = () => {
                                                         headers: { Authorization: token },
                                                     });
                                                     setMeetings((meetings || []).filter((m: any) => String(m._id?.$oid || m._id || m.id) !== meetingId));
+                                                    if (editingMeetingId === meetingId) {
+                                                        setEditingMeetingId(null);
+                                                    }
                                                     window.dispatchEvent(new CustomEvent('officeMeetingDeleted', { detail: { meetingId } }));
                                                 } catch (err) {
                                                     console.error('Failed to delete meeting', err);
+                                                }
+                                            };
+
+                                            const startEditMeeting = (m: any) => {
+                                                const mid = String(m._id?.$oid || m._id || m.id);
+                                                setEditingMeetingId(mid);
+                                                setEditMeetingName(m.name || 'Meeting');
+                                                setEditMeetingColor(m.color || DEFAULT_MEETING_COLOR);
+                                                setEditMeetingTeacherIds((m.teacher_ids || []).map(String));
+                                                setEditMeetingSearch('');
+                                            };
+
+                                            const cancelEditMeeting = () => {
+                                                setEditingMeetingId(null);
+                                                setEditMeetingSearch('');
+                                            };
+
+                                            const saveMeetingEdit = async () => {
+                                                if (!editingMeetingId) return;
+                                                const ids = editMeetingTeacherIds.length ? editMeetingTeacherIds : [teacherId];
+                                                setSavingMeetingEdit(true);
+                                                try {
+                                                    const res = await axios.put(
+                                                        `${API_BASE}/meeting/${editingMeetingId}/update`,
+                                                        {
+                                                            name: editMeetingName.trim() || 'Meeting',
+                                                            color: editMeetingColor || DEFAULT_MEETING_COLOR,
+                                                            teacher_ids: ids,
+                                                        },
+                                                        { headers: { Authorization: token } }
+                                                    );
+                                                    const updated = res.data?.meeting;
+                                                    if (updated) {
+                                                        const mid = String(updated._id?.$oid || updated._id || updated.id || editingMeetingId);
+                                                        const updatedIds = (updated.teacher_ids || []).map(String);
+                                                        if (teacherId && !updatedIds.includes(teacherId)) {
+                                                            setMeetings(
+                                                                (meetings || []).filter(
+                                                                    (m: any) => String(m._id?.$oid || m._id || m.id) !== mid
+                                                                )
+                                                            );
+                                                        } else {
+                                                            setMeetings(
+                                                                (meetings || []).map((m: any) =>
+                                                                    String(m._id?.$oid || m._id || m.id) === mid ? updated : m
+                                                                )
+                                                            );
+                                                        }
+                                                        window.dispatchEvent(
+                                                            new CustomEvent('officeMeetingUpdated', { detail: { meeting: updated } })
+                                                        );
+                                                    }
+                                                    setEditingMeetingId(null);
+                                                    setEditMeetingSearch('');
+                                                } catch (err) {
+                                                    console.error('Failed to update meeting', err);
+                                                } finally {
+                                                    setSavingMeetingEdit(false);
                                                 }
                                             };
 
@@ -1164,19 +1231,24 @@ const Navbar = () => {
                                                             {(meetings || []).map((m: any) => {
                                                                 const mid = String(m._id?.$oid || m._id || m.id);
                                                                 const names = m.teacher_names || [];
+                                                                const isEditing = editingMeetingId === mid;
                                                                 return (
                                                                     <Box
                                                                         key={mid}
                                                                         w="100%"
-                                                                        bg={m.color || DEFAULT_MEETING_COLOR}
+                                                                        bg={isEditing ? (editMeetingColor || m.color || DEFAULT_MEETING_COLOR) : (m.color || DEFAULT_MEETING_COLOR)}
                                                                         color="black"
                                                                         px={2}
                                                                         py={3}
                                                                         border="1px solid black"
                                                                         borderRadius="md"
                                                                         position="relative"
-                                                                        draggable
+                                                                        draggable={!isEditing}
                                                                         onDragStart={(e: React.DragEvent) => {
+                                                                            if (isEditing) {
+                                                                                e.preventDefault();
+                                                                                return;
+                                                                            }
                                                                             e.dataTransfer.setData("subject_id", meetingSubjectId(mid));
                                                                             e.dataTransfer.setData("meeting_id", mid);
                                                                             setDraggedSubjectId(meetingSubjectId(mid));
@@ -1198,30 +1270,123 @@ const Navbar = () => {
                                                                         onDragEnd={() => {
                                                                             window.dispatchEvent(new CustomEvent("clearDragPreview"));
                                                                         }}
-                                                                        cursor="grab"
-                                                                        _hover={{ opacity: 0.9 }}
+                                                                        cursor={isEditing ? "default" : "grab"}
+                                                                        _hover={{ opacity: isEditing ? 1 : 0.9 }}
                                                                     >
-                                                                        <Button
-                                                                            size="xs"
-                                                                            position="absolute"
-                                                                            top={1}
-                                                                            right={1}
-                                                                            colorScheme="red"
-                                                                            variant="ghost"
-                                                                            onClick={(e) => {
-                                                                                e.stopPropagation();
-                                                                                deleteMeeting(mid);
-                                                                            }}
-                                                                        >
-                                                                            ×
-                                                                        </Button>
-                                                                        <VStack spacing={0} pr={4}>
-                                                                            <Text fontWeight="bold" fontSize="md">{m.name || 'Meeting'}</Text>
-                                                                            <Text fontSize="xs" color="gray.700" textAlign="center">
-                                                                                {names.join(', ') || 'No teachers'}
-                                                                            </Text>
-                                                                            <Text fontSize="xs" color="gray.500">Hold ⌘ while dragging to preview</Text>
-                                                                        </VStack>
+                                                                        <HStack position="absolute" top={1} right={1} spacing={0}>
+                                                                            {!isEditing && (
+                                                                                <Button
+                                                                                    size="xs"
+                                                                                    colorScheme="blackAlpha"
+                                                                                    variant="ghost"
+                                                                                    onClick={(e) => {
+                                                                                        e.stopPropagation();
+                                                                                        startEditMeeting(m);
+                                                                                    }}
+                                                                                >
+                                                                                    Edit
+                                                                                </Button>
+                                                                            )}
+                                                                            <Button
+                                                                                size="xs"
+                                                                                colorScheme="red"
+                                                                                variant="ghost"
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation();
+                                                                                    deleteMeeting(mid);
+                                                                                }}
+                                                                            >
+                                                                                ×
+                                                                            </Button>
+                                                                        </HStack>
+                                                                        {isEditing ? (
+                                                                            <VStack align="stretch" spacing={2} pr={1} pt={5} onMouseDown={(e) => e.stopPropagation()}>
+                                                                                <Input
+                                                                                    size="sm"
+                                                                                    bg="white"
+                                                                                    value={editMeetingName}
+                                                                                    onChange={(e) => setEditMeetingName(e.target.value)}
+                                                                                    placeholder="Meeting name"
+                                                                                />
+                                                                                <HStack>
+                                                                                    <Text fontSize="sm" minW="40px">Color</Text>
+                                                                                    <Input
+                                                                                        type="color"
+                                                                                        value={editMeetingColor}
+                                                                                        onChange={(e) => setEditMeetingColor(e.target.value)}
+                                                                                        w="60px"
+                                                                                        p={0}
+                                                                                        h="32px"
+                                                                                    />
+                                                                                </HStack>
+                                                                                <Text fontSize="xs" fontWeight="bold">Teachers</Text>
+                                                                                <Input
+                                                                                    size="sm"
+                                                                                    bg="white"
+                                                                                    placeholder="Search teachers..."
+                                                                                    value={editMeetingSearch}
+                                                                                    onChange={(e) => setEditMeetingSearch(e.target.value)}
+                                                                                />
+                                                                                <VStack align="stretch" maxH="140px" overflowY="auto" spacing={1} bg="whiteAlpha.700" borderRadius="md" p={1}>
+                                                                                    {allTeachers
+                                                                                        .filter((t: any) => {
+                                                                                            const term = editMeetingSearch.trim().toLowerCase();
+                                                                                            if (!term) return true;
+                                                                                            const name = String(t.displayname || t.name || '').toLowerCase();
+                                                                                            return name.includes(term);
+                                                                                        })
+                                                                                        .map((t: any) => {
+                                                                                            const tid = String(t._id?.$oid || t._id);
+                                                                                            const checked = editMeetingTeacherIds.includes(tid);
+                                                                                            return (
+                                                                                                <Checkbox
+                                                                                                    key={tid}
+                                                                                                    size="sm"
+                                                                                                    isChecked={checked}
+                                                                                                    onChange={(e) => {
+                                                                                                        if (e.target.checked) {
+                                                                                                            setEditMeetingTeacherIds([...editMeetingTeacherIds, tid]);
+                                                                                                        } else {
+                                                                                                            setEditMeetingTeacherIds(editMeetingTeacherIds.filter((id) => id !== tid));
+                                                                                                        }
+                                                                                                    }}
+                                                                                                >
+                                                                                                    {t.displayname || t.name}
+                                                                                                </Checkbox>
+                                                                                            );
+                                                                                        })}
+                                                                                </VStack>
+                                                                                <HStack>
+                                                                                    <Button
+                                                                                        size="sm"
+                                                                                        colorScheme="teal"
+                                                                                        flex={1}
+                                                                                        isLoading={savingMeetingEdit}
+                                                                                        isDisabled={!editMeetingTeacherIds.length}
+                                                                                        onClick={saveMeetingEdit}
+                                                                                    >
+                                                                                        Save
+                                                                                    </Button>
+                                                                                    <Button
+                                                                                        size="sm"
+                                                                                        variant="outline"
+                                                                                        flex={1}
+                                                                                        onClick={cancelEditMeeting}
+                                                                                        isDisabled={savingMeetingEdit}
+                                                                                    >
+                                                                                        Cancel
+                                                                                    </Button>
+                                                                                </HStack>
+                                                                            </VStack>
+                                                                        ) : (
+                                                                            <VStack spacing={0} pr={10}>
+                                                                                <Text fontWeight="bold" fontSize="md">{m.name || 'Meeting'}</Text>
+                                                                                <Text fontSize="xs" color="gray.700" textAlign="center">
+                                                                                    {names.join(', ') || 'No teachers'}
+                                                                                </Text>
+                                                                                <Text fontSize="xs" color="gray.500">Hold ⌘ while dragging to preview</Text>
+                                                                            </VStack>
+                                                                        )}
                                                                     </Box>
                                                                 );
                                                             })}

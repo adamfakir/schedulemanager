@@ -1138,6 +1138,32 @@ function ScheduleItem() {
             if (!meetingId) return;
             setTimeblocks((prev) => prev.filter((tb) => !(isMeetingBlock(tb) && getMeetingIdFromBlock(tb) === meetingId)));
         };
+        const onMeetingUpdated = (e: Event) => {
+            const meeting = (e as CustomEvent).detail?.meeting;
+            if (!meeting) return;
+            const meetingId = String(meeting._id?.$oid || meeting._id || meeting.id || '');
+            if (!meetingId) return;
+            const teacherIds = (meeting.teacher_ids || []).map(String);
+            const currentTeacherId = String(item?._id?.$oid || item?._id || id || '');
+            // If this teacher was removed, drop the meeting blocks from their open schedule
+            if (currentTeacherId && !teacherIds.includes(currentTeacherId)) {
+                setTimeblocks((prev) => prev.filter((tb) => !(isMeetingBlock(tb) && getMeetingIdFromBlock(tb) === meetingId)));
+                return;
+            }
+            const names = meeting.teacher_names || [];
+            setTimeblocks((prev) =>
+                prev.map((tb) => {
+                    if (!(isMeetingBlock(tb) && getMeetingIdFromBlock(tb) === meetingId)) return tb;
+                    return {
+                        ...tb,
+                        name: meeting.name || tb.name,
+                        color: meeting.color || tb.color,
+                        teachers: names,
+                        teacherIds,
+                    };
+                })
+            );
+        };
         const onTemplateDeleted = (e: Event) => {
             const templateId = String((e as CustomEvent).detail?.templateId || '');
             if (!templateId) return;
@@ -1157,9 +1183,11 @@ function ScheduleItem() {
             });
         };
         window.addEventListener('officeMeetingDeleted', onMeetingDeleted as EventListener);
+        window.addEventListener('officeMeetingUpdated', onMeetingUpdated as EventListener);
         window.addEventListener('officeCustomTemplateDeleted', onTemplateDeleted as EventListener);
         return () => {
             window.removeEventListener('officeMeetingDeleted', onMeetingDeleted as EventListener);
+            window.removeEventListener('officeMeetingUpdated', onMeetingUpdated as EventListener);
             window.removeEventListener('officeCustomTemplateDeleted', onTemplateDeleted as EventListener);
         };
     }, [item, id]);
