@@ -1,6 +1,7 @@
 import { jsPDF } from 'jspdf';
 import {
     DAYS,
+    MON_THU_DAYS,
     ScheduleBlock,
     HoursSummary,
     buildSortedTimes,
@@ -11,6 +12,7 @@ import {
     formatHoursLabel,
     timeToMinutes,
     minutesToTime,
+    shouldUseSeparateFridayTimes,
 } from './scheduleData';
 
 export type PdfExportProgress = {
@@ -32,15 +34,39 @@ type RenderOptions = {
 
 const SCALE = 2;
 const PX_PER_MINUTE = 1.35;
-const MIN_ROW_HEIGHT = 24;
-const TIME_COL_WIDTH = 74;
-const DAY_COL_WIDTH = 148;
-const HEADER_H = 30;
-const PAGE_PAD = 24;
-const HOURS_WIDTH = 230;
-const HOURS_GAP = 18;
-const BG = '#e6fcef';
-const BLUE = '#4299e1';
+const MIN_ROW_HEIGHT = 22;
+const TIME_COL_WIDTH = 68;
+const DAY_COL_WIDTH = 142;
+const HEADER_H = 28;
+const PAGE_PAD = 22;
+const HOURS_WIDTH = 220;
+const HOURS_GAP = 16;
+const SECTION_GAP = 10;
+
+/** Soft, professional palette — muted slate instead of bright mint/blue. */
+const COLORS = {
+    pageBg: '#f4f6f8',
+    title: '#1e293b',
+    subtitle: '#64748b',
+    headerBg: '#3d4f5f',
+    headerText: '#ffffff',
+    timeBg: '#e8eef2',
+    timeText: '#334155',
+    dayHeaderBg: '#4a5d6e',
+    cellBg: '#ffffff',
+    gridStroke: '#c5ced6',
+    blockStroke: '#94a3b8',
+    bodyText: '#1e293b',
+    mutedText: '#64748b',
+    hoursCard: '#eef3f7',
+    hoursCardStroke: '#b8c5d0',
+    hoursAccent: '#dbe7f0',
+    hoursAccentStroke: '#8aa4b8',
+    overlap: '#b85c5c',
+    fridayDivider: '#cbd5e1',
+};
+
+const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
 const roundRect = (
     ctx: CanvasRenderingContext2D,
@@ -67,22 +93,41 @@ const fillStrokeRect = (
     w: number,
     h: number,
     fill: string,
-    stroke = '#000',
-    radius = 0
+    stroke = COLORS.gridStroke,
+    radius = 0,
+    lineWidth = 1
 ) => {
     ctx.fillStyle = fill;
     if (radius > 0) {
         roundRect(ctx, x, y, w, h, radius);
         ctx.fill();
         ctx.strokeStyle = stroke;
-        ctx.lineWidth = 1;
+        ctx.lineWidth = lineWidth;
         ctx.stroke();
     } else {
         ctx.fillRect(x, y, w, h);
         ctx.strokeStyle = stroke;
-        ctx.lineWidth = 1;
+        ctx.lineWidth = lineWidth;
         ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
     }
+};
+
+/** Soften harsh subject colors for print — mix toward white and lightly desaturate. */
+const softenColor = (hex: string, whiteMix = 0.32): string => {
+    const raw = String(hex || '').trim().replace('#', '');
+    if (!/^[0-9a-fA-F]{6}$/.test(raw)) return '#c5d4dc';
+    let r = parseInt(raw.slice(0, 2), 16);
+    let g = parseInt(raw.slice(2, 4), 16);
+    let b = parseInt(raw.slice(4, 6), 16);
+    // Pull toward grayscale a bit so neon colors calm down
+    const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+    const satPull = 0.22;
+    r = Math.round(r * (1 - satPull) + gray * satPull);
+    g = Math.round(g * (1 - satPull) + gray * satPull);
+    b = Math.round(b * (1 - satPull) + gray * satPull);
+    const mix = (c: number) => Math.round(c * (1 - whiteMix) + 255 * whiteMix);
+    const toHex = (c: number) => Math.max(0, Math.min(255, c)).toString(16).padStart(2, '0');
+    return `#${toHex(mix(r))}${toHex(mix(g))}${toHex(mix(b))}`;
 };
 
 /** Wrap text to fit maxWidth — never shrink; break long words if needed. */
@@ -141,7 +186,8 @@ const drawCenteredStyledLines = (
     y: number,
     w: number,
     h: number,
-    padX = 8
+    padX = 8,
+    color = COLORS.bodyText
 ) => {
     const maxWidth = Math.max(20, w - padX * 2);
     const styled: StyledLine[] = [];
@@ -167,12 +213,11 @@ const drawCenteredStyledLines = (
     ctx.clip();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#000';
+    ctx.fillStyle = color;
 
     styled.forEach((line) => {
         const mid = cursorY + line.lineHeight / 2;
         ctx.font = line.font;
-        // IMPORTANT: no 4th maxWidth arg — that compresses glyphs instead of wrapping
         ctx.fillText(line.text, cx, mid);
         cursorY += line.lineHeight;
     });
@@ -187,7 +232,7 @@ const drawCenteredLines = (
     y: number,
     w: number,
     h: number,
-    opts: { font: string; color?: string; lineHeight?: number; maxWidth?: number }
+    opts: { font: string; color?: string; lineHeight?: number }
 ) => {
     drawCenteredStyledLines(
         ctx,
@@ -199,17 +244,29 @@ const drawCenteredLines = (
         x,
         y,
         w,
-        h
+        h,
+        6,
+        opts.color || COLORS.bodyText
     );
 };
+
+const namesMatch = (a: string, b: string): boolean =>
+    cropSemesterTag(a).trim().toLowerCase() === cropSemesterTag(b).trim().toLowerCase();
 
 const blockSubtitle = (
     block: ScheduleBlock,
     type: 'Student' | 'Teacher',
-    hideTeacherNames: boolean
+    hideTeacherNames: boolean,
+    currentTeacherName?: string
 ): string => {
-    if (type === 'Teacher' && block.isMeeting && block.teachers?.length) {
-        return block.teachers.map(cropSemesterTag).join(', ');
+    if (type === 'Teacher' && block.isMeeting) {
+        const attendees = block.teachers || [];
+        // Large meetings: title only (no attendee list)
+        if (attendees.length > 4) return '';
+        const others = currentTeacherName
+            ? attendees.filter((t) => !namesMatch(t, currentTeacherName))
+            : attendees;
+        return others.map(cropSemesterTag).join(', ');
     }
     if (type === 'Teacher' && block.displayclass) {
         return cropSemesterTag(block.displayclass);
@@ -296,31 +353,28 @@ const drawBlockLabel = (
     y: number,
     w: number,
     h: number,
-    compact = false
+    compact = false,
+    currentTeacherName?: string
 ) => {
     const title = cropSemesterTag(block.name);
-    const sub = blockSubtitle(block, type, hideTeacherNames);
+    const sub = blockSubtitle(block, type, hideTeacherNames, currentTeacherName);
     const parts = [
         {
             text: title,
-            font: compact
-                ? 'bold 10px system-ui, -apple-system, sans-serif'
-                : 'bold 12px system-ui, -apple-system, sans-serif',
+            font: compact ? `600 10px ${FONT}` : `600 12px ${FONT}`,
             lineHeight: compact ? 12 : 15,
         },
         ...(sub
             ? [
                   {
                       text: sub,
-                      font: compact
-                          ? '9px system-ui, -apple-system, sans-serif'
-                          : '10px system-ui, -apple-system, sans-serif',
+                      font: compact ? `9px ${FONT}` : `10px ${FONT}`,
                       lineHeight: compact ? 11 : 13,
                   },
               ]
             : []),
     ];
-    drawCenteredStyledLines(ctx, parts, x, y, w, h, compact ? 4 : 8);
+    drawCenteredStyledLines(ctx, parts, x, y, w, h, compact ? 4 : 7);
 };
 
 const drawHoursPanel = (
@@ -331,193 +385,232 @@ const drawHoursPanel = (
     y: number
 ): number => {
     let cy = y;
-    ctx.fillStyle = '#000';
-    ctx.font = 'bold 14px system-ui, -apple-system, sans-serif';
+    ctx.fillStyle = COLORS.title;
+    ctx.font = `600 13px ${FONT}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText('Hours', x, cy);
-    cy += 22;
+    ctx.fillText('Hours summary', x, cy);
+    cy += 20;
 
     if (excludeEmpty) {
-        ctx.font = '11px system-ui, -apple-system, sans-serif';
-        ctx.fillStyle = '#4a5568';
+        ctx.font = `10px ${FONT}`;
+        ctx.fillStyle = COLORS.mutedText;
         ctx.fillText('Empty time excluded', x, cy);
-        cy += 18;
+        cy += 16;
     }
 
     const totalShown = excludeEmpty ? hours.totalFilled : hours.totalSpan;
-    fillStrokeRect(ctx, x, cy, HOURS_WIDTH, 64, '#ebf8ff', '#63b3ed', 8);
-    ctx.fillStyle = '#000';
-    ctx.font = 'bold 13px system-ui, -apple-system, sans-serif';
+    fillStrokeRect(ctx, x, cy, HOURS_WIDTH, 60, COLORS.hoursAccent, COLORS.hoursAccentStroke, 8);
+    ctx.fillStyle = COLORS.title;
+    ctx.font = `600 12px ${FONT}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText('Week total', x + 10, cy + 8);
-    ctx.font = 'bold 18px system-ui, -apple-system, sans-serif';
-    ctx.fillText(formatHoursLabel(totalShown), x + 10, cy + 28);
-    ctx.font = '11px system-ui, -apple-system, sans-serif';
-    ctx.fillStyle = '#4a5568';
+    ctx.fillText('Week total', x + 12, cy + 8);
+    ctx.font = `600 17px ${FONT}`;
+    ctx.fillText(formatHoursLabel(totalShown), x + 12, cy + 26);
+    ctx.font = `10px ${FONT}`;
+    ctx.fillStyle = COLORS.mutedText;
     ctx.fillText(
         excludeEmpty
             ? 'Classes + office only'
             : `Filled ${formatHoursLabel(hours.totalFilled)} · Empty ${formatHoursLabel(hours.totalEmpty)}`,
-        x + 10,
-        cy + 50
+        x + 12,
+        cy + 46
     );
-    cy += 74;
+    cy += 70;
 
     hours.days.forEach((d) => {
-        const cardH = d.earliest ? 58 : 42;
-        fillStrokeRect(ctx, x, cy, HOURS_WIDTH, cardH, d.earliest ? '#fff' : '#f7fafc', d.earliest ? '#a0aec0' : '#cbd5e0', 8);
-        ctx.fillStyle = '#000';
-        ctx.font = 'bold 12px system-ui, -apple-system, sans-serif';
+        const cardH = d.earliest ? 54 : 40;
+        fillStrokeRect(
+            ctx,
+            x,
+            cy,
+            HOURS_WIDTH,
+            cardH,
+            d.earliest ? COLORS.cellBg : COLORS.hoursCard,
+            COLORS.hoursCardStroke,
+            7
+        );
+        ctx.fillStyle = COLORS.title;
+        ctx.font = `600 11px ${FONT}`;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
-        ctx.fillText(d.day, x + 10, cy + 8);
+        ctx.fillText(d.day, x + 12, cy + 8);
         if (!d.earliest) {
-            ctx.font = '11px system-ui, -apple-system, sans-serif';
-            ctx.fillStyle = '#718096';
-            ctx.fillText('No classes', x + 10, cy + 26);
+            ctx.font = `10px ${FONT}`;
+            ctx.fillStyle = COLORS.mutedText;
+            ctx.fillText('No classes', x + 12, cy + 24);
         } else {
             const shown = excludeEmpty ? d.filled : d.span;
             ctx.textAlign = 'right';
-            ctx.fillText(formatHoursLabel(shown), x + HOURS_WIDTH - 10, cy + 8);
+            ctx.fillStyle = COLORS.title;
+            ctx.fillText(formatHoursLabel(shown), x + HOURS_WIDTH - 12, cy + 8);
             ctx.textAlign = 'left';
-            ctx.font = '11px system-ui, -apple-system, sans-serif';
-            ctx.fillStyle = '#4a5568';
-            ctx.fillText(`${d.earliest} – ${d.latest}`, x + 10, cy + 26);
+            ctx.font = `10px ${FONT}`;
+            ctx.fillStyle = COLORS.mutedText;
+            ctx.fillText(`${d.earliest} – ${d.latest}`, x + 12, cy + 24);
             ctx.fillText(
                 excludeEmpty
                     ? `Filled only (empty was ${formatHoursLabel(d.empty)})`
                     : `Filled ${formatHoursLabel(d.filled)} · Empty ${formatHoursLabel(d.empty)}`,
-                x + 10,
-                cy + 40
+                x + 12,
+                cy + 38
             );
         }
-        cy += cardH + 8;
+        cy += cardH + 7;
     });
 
     return cy - y;
 };
 
-const renderScheduleCanvas = (opts: RenderOptions): HTMLCanvasElement => {
-    const sortedTimes = buildSortedTimes(opts.blocks);
-    const showEndTime = !!opts.showEndTime;
-    const timeColCount = showEndTime ? 2 : 1;
-    const showHours = opts.type === 'Teacher' && opts.includeHours && opts.hours;
+type TimeAxis = {
+    times: string[];
+    rowTops: number[];
+    rowHeights: number[];
+    gridH: number;
+    timeToRowIndex: Map<string, number>;
+    resolveEndRowIndex: (endTime: string) => number;
+    yForTime: (time: string, gridY: number) => number;
+};
 
-    const rowHeights = sortedTimes.map((t, i) => {
-        if (i >= sortedTimes.length - 1) return Math.max(MIN_ROW_HEIGHT, 24);
-        const mins = timeToMinutes(sortedTimes[i + 1]) - timeToMinutes(t);
+const buildTimeAxis = (blocks: ScheduleBlock[]): TimeAxis => {
+    const times = buildSortedTimes(blocks);
+    const rowHeights = times.map((t, i) => {
+        if (i >= times.length - 1) return Math.max(MIN_ROW_HEIGHT, 22);
+        const mins = timeToMinutes(times[i + 1]) - timeToMinutes(t);
         return Math.max(MIN_ROW_HEIGHT, mins * PX_PER_MINUTE);
     });
-
     const rowTops: number[] = [];
     let yCursor = HEADER_H;
     for (let i = 0; i < rowHeights.length; i++) {
         rowTops.push(yCursor);
         yCursor += rowHeights[i];
     }
-    const gridH = yCursor;
-    const gridW = TIME_COL_WIDTH * timeColCount + DAY_COL_WIDTH * 5;
-
-    const titleBlockH = 32;
-    const contentW = gridW + (showHours ? HOURS_GAP + HOURS_WIDTH : 0);
-    const hoursH = showHours
-        ? 22 + (opts.excludeEmptyHours ? 18 : 0) + 74 + opts.hours!.days.length * 66
-        : 0;
-    const contentH = Math.max(gridH, hoursH);
-    const canvasW = PAGE_PAD * 2 + contentW;
-    const canvasH = PAGE_PAD * 2 + titleBlockH + contentH;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.ceil(canvasW * SCALE);
-    canvas.height = Math.ceil(canvasH * SCALE);
-    const ctx = canvas.getContext('2d')!;
-    ctx.scale(SCALE, SCALE);
-
-    // Page background
-    ctx.fillStyle = BG;
-    ctx.fillRect(0, 0, canvasW, canvasH);
-
-    // Title
-    const titleX = PAGE_PAD;
-    const titleY = PAGE_PAD;
-    ctx.fillStyle = '#000';
-    ctx.font = 'bold 22px system-ui, -apple-system, sans-serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillText(`${opts.type}: ${opts.name}`, titleX, titleY);
-
-    const gridX = PAGE_PAD;
-    const gridY = PAGE_PAD + titleBlockH;
-
-    const dayLeft = (dayIndex: number) => gridX + TIME_COL_WIDTH * timeColCount + dayIndex * DAY_COL_WIDTH;
-
-    // Header row
-    const headers = [
-        { label: showEndTime ? 'Start' : 'Time', left: gridX, width: TIME_COL_WIDTH, color: '#fff' },
-        ...(showEndTime
-            ? [{ label: 'End', left: gridX + TIME_COL_WIDTH, width: TIME_COL_WIDTH, color: '#fff' }]
-            : []),
-        ...DAYS.map((d, i) => ({ label: d, left: dayLeft(i), width: DAY_COL_WIDTH, color: '#000' })),
-    ];
-    headers.forEach((h) => {
-        fillStrokeRect(ctx, h.left, gridY, h.width, HEADER_H, BLUE);
-        drawCenteredLines(ctx, [h.label], h.left, gridY, h.width, HEADER_H, {
-            font: 'bold 12px system-ui, -apple-system, sans-serif',
-            color: h.color,
-            lineHeight: 14,
-        });
-    });
-
-    // Time rows + empty day cells
-    sortedTimes.forEach((t, i) => {
-        const top = gridY + rowTops[i];
-        const height = rowHeights[i];
-        const endLabel = i < sortedTimes.length - 1 ? sortedTimes[i + 1] : '—';
-
-        fillStrokeRect(ctx, gridX, top, TIME_COL_WIDTH, height, BLUE);
-        drawCenteredLines(ctx, [t], gridX, top, TIME_COL_WIDTH, height, {
-            font: 'bold 11px system-ui, -apple-system, sans-serif',
-            color: '#000',
-            lineHeight: 13,
-        });
-
-        if (showEndTime) {
-            fillStrokeRect(ctx, gridX + TIME_COL_WIDTH, top, TIME_COL_WIDTH, height, BLUE);
-            drawCenteredLines(ctx, [endLabel], gridX + TIME_COL_WIDTH, top, TIME_COL_WIDTH, height, {
-                font: 'bold 11px system-ui, -apple-system, sans-serif',
-                color: '#000',
-                lineHeight: 13,
-            });
-        }
-
-        DAYS.forEach((_d, dayIndex) => {
-            fillStrokeRect(ctx, dayLeft(dayIndex), top, DAY_COL_WIDTH, height, '#fff');
-        });
-    });
-
-    const timeToRowIndex = new Map(sortedTimes.map((t, i) => [t, i]));
+    const timeToRowIndex = new Map(times.map((t, i) => [t, i]));
     const resolveEndRowIndex = (endTime: string): number => {
         const exact = timeToRowIndex.get(endTime);
         if (exact !== undefined) return exact;
         const endMin = timeToMinutes(endTime);
-        const idx = sortedTimes.findIndex((tm) => timeToMinutes(tm) >= endMin);
-        return idx >= 0 ? idx : sortedTimes.length - 1;
+        const idx = times.findIndex((tm) => timeToMinutes(tm) >= endMin);
+        return idx >= 0 ? idx : times.length - 1;
     };
-
-    const yForTime = (time: string): number => {
-        const idx = timeToRowIndex.get(time);
-        if (idx !== undefined) return gridY + rowTops[idx];
-        const endIdx = resolveEndRowIndex(time);
-        return gridY + rowTops[endIdx];
+    return {
+        times,
+        rowTops,
+        rowHeights,
+        gridH: yCursor,
+        timeToRowIndex,
+        resolveEndRowIndex,
+        yForTime: (time: string, gridY: number) => {
+            const idx = timeToRowIndex.get(time);
+            if (idx !== undefined) return gridY + rowTops[idx];
+            return gridY + rowTops[resolveEndRowIndex(time)];
+        },
     };
+};
 
-    const overlaps = getOverlaps(opts.blocks);
+/** Draw a Time / Start / End column against a given axis. */
+const drawTimeColumns = (
+    ctx: CanvasRenderingContext2D,
+    axis: TimeAxis,
+    gridX: number,
+    gridY: number,
+    showEndTime: boolean,
+    headerLabel: string
+) => {
+    const cols = showEndTime ? 2 : 1;
+    // Header
+    for (let c = 0; c < cols; c++) {
+        const label = showEndTime ? (c === 0 ? 'Start' : 'End') : headerLabel;
+        fillStrokeRect(
+            ctx,
+            gridX + c * TIME_COL_WIDTH,
+            gridY,
+            TIME_COL_WIDTH,
+            HEADER_H,
+            COLORS.headerBg,
+            COLORS.gridStroke
+        );
+        drawCenteredLines(ctx, [label], gridX + c * TIME_COL_WIDTH, gridY, TIME_COL_WIDTH, HEADER_H, {
+            font: `600 11px ${FONT}`,
+            color: COLORS.headerText,
+            lineHeight: 13,
+        });
+    }
 
-    // Solo (non-overlap) segments of each block — full column width
-    opts.blocks.forEach((block) => {
-        const dayIndex = DAYS.indexOf(block.start.day as any);
+    axis.times.forEach((t, i) => {
+        const top = gridY + axis.rowTops[i];
+        const height = axis.rowHeights[i];
+        const endLabel = i < axis.times.length - 1 ? axis.times[i + 1] : '—';
+
+        fillStrokeRect(ctx, gridX, top, TIME_COL_WIDTH, height, COLORS.timeBg, COLORS.gridStroke);
+        drawCenteredLines(ctx, [t], gridX, top, TIME_COL_WIDTH, height, {
+            font: `600 10px ${FONT}`,
+            color: COLORS.timeText,
+            lineHeight: 12,
+        });
+
+        if (showEndTime) {
+            fillStrokeRect(
+                ctx,
+                gridX + TIME_COL_WIDTH,
+                top,
+                TIME_COL_WIDTH,
+                height,
+                COLORS.timeBg,
+                COLORS.gridStroke
+            );
+            drawCenteredLines(ctx, [endLabel], gridX + TIME_COL_WIDTH, top, TIME_COL_WIDTH, height, {
+                font: `600 10px ${FONT}`,
+                color: COLORS.timeText,
+                lineHeight: 12,
+            });
+        }
+    });
+};
+
+const drawDayHeadersAndCells = (
+    ctx: CanvasRenderingContext2D,
+    days: readonly string[],
+    dayLeft: (dayIndex: number) => number,
+    gridY: number,
+    axis: TimeAxis
+) => {
+    days.forEach((d, i) => {
+        fillStrokeRect(ctx, dayLeft(i), gridY, DAY_COL_WIDTH, HEADER_H, COLORS.dayHeaderBg, COLORS.gridStroke);
+        drawCenteredLines(ctx, [d], dayLeft(i), gridY, DAY_COL_WIDTH, HEADER_H, {
+            font: `600 11px ${FONT}`,
+            color: COLORS.headerText,
+            lineHeight: 13,
+        });
+    });
+
+    axis.times.forEach((_t, i) => {
+        const top = gridY + axis.rowTops[i];
+        const height = axis.rowHeights[i];
+        days.forEach((_d, dayIndex) => {
+            fillStrokeRect(ctx, dayLeft(dayIndex), top, DAY_COL_WIDTH, height, COLORS.cellBg, COLORS.gridStroke);
+        });
+    });
+};
+
+const drawBlocksOnAxis = (
+    ctx: CanvasRenderingContext2D,
+    blocks: ScheduleBlock[],
+    days: readonly string[],
+    dayLeft: (dayIndex: number) => number,
+    gridY: number,
+    axis: TimeAxis,
+    type: 'Student' | 'Teacher',
+    hideTeacherNames: boolean,
+    currentTeacherName?: string
+) => {
+    const overlaps = getOverlaps(blocks);
+    const daySet = new Set(days as readonly string[]);
+
+    blocks.forEach((block) => {
+        if (!daySet.has(block.start.day)) return;
+        const dayIndex = (days as readonly string[]).indexOf(block.start.day);
         if (dayIndex < 0) return;
 
         const blockStartMin = timeToMinutes(block.start.time);
@@ -543,60 +636,68 @@ const renderScheduleCanvas = (opts: RenderOptions): HTMLCanvasElement => {
         });
 
         const soloSegments: Array<{ start: number; end: number }> = [];
-        let cursor = blockStartMin;
-        merged.forEach((m) => {
-            if (cursor < m.start) soloSegments.push({ start: cursor, end: m.start });
-            cursor = Math.max(cursor, m.end);
-        });
-        if (cursor < blockEndMin) soloSegments.push({ start: cursor, end: blockEndMin });
-
-        // If no overlaps at all, draw the whole block once
         if (!merged.length) {
-            soloSegments.length = 0;
             soloSegments.push({ start: blockStartMin, end: blockEndMin });
+        } else {
+            let cursor = blockStartMin;
+            merged.forEach((m) => {
+                if (cursor < m.start) soloSegments.push({ start: cursor, end: m.start });
+                cursor = Math.max(cursor, m.end);
+            });
+            if (cursor < blockEndMin) soloSegments.push({ start: cursor, end: blockEndMin });
         }
 
+        const fill = softenColor(block.color || '#9fb6c0');
         soloSegments.forEach((seg) => {
             if (seg.end <= seg.start) return;
-            const top = yForTime(minutesToTime(seg.start));
-            const bottom = yForTime(minutesToTime(seg.end));
+            const top = axis.yForTime(minutesToTime(seg.start), gridY);
+            const bottom = axis.yForTime(minutesToTime(seg.end), gridY);
             const height = Math.max(MIN_ROW_HEIGHT, bottom - top);
             const left = dayLeft(dayIndex);
-            fillStrokeRect(ctx, left, top, DAY_COL_WIDTH, height, block.color || '#38b2ac', '#000', 6);
-            drawBlockLabel(ctx, block, opts.type, !!opts.hideTeacherNames, left, top, DAY_COL_WIDTH, height);
+            fillStrokeRect(ctx, left, top, DAY_COL_WIDTH, height, fill, COLORS.blockStroke, 5);
+            drawBlockLabel(
+                ctx,
+                block,
+                type,
+                hideTeacherNames,
+                left,
+                top,
+                DAY_COL_WIDTH,
+                height,
+                false,
+                currentTeacherName
+            );
         });
     });
 
-    // Overlap windows — red outline, side-by-side panes (like ScheduleItem)
     overlaps.forEach((overlap) => {
-        const dayIndex = DAYS.indexOf(overlap.day as any);
+        if (!daySet.has(overlap.day)) return;
+        const dayIndex = (days as readonly string[]).indexOf(overlap.day);
         if (dayIndex < 0) return;
-        const top = yForTime(overlap.start);
-        const bottom = yForTime(overlap.end);
+        const top = axis.yForTime(overlap.start, gridY);
+        const bottom = axis.yForTime(overlap.end, gridY);
         const height = Math.max(MIN_ROW_HEIGHT, bottom - top);
         const left = dayLeft(dayIndex);
         const n = overlap.blocks.length;
         if (n < 2) return;
 
-        // Outer red border container
-        fillStrokeRect(ctx, left, top, DAY_COL_WIDTH, height, '#fff', '#e53e3e', 6);
-        // Thicker red stroke
+        fillStrokeRect(ctx, left, top, DAY_COL_WIDTH, height, COLORS.cellBg, COLORS.overlap, 5, 1.5);
         ctx.save();
-        ctx.strokeStyle = '#e53e3e';
-        ctx.lineWidth = 3;
-        roundRect(ctx, left + 1.5, top + 1.5, DAY_COL_WIDTH - 3, height - 3, 5);
+        ctx.strokeStyle = COLORS.overlap;
+        ctx.lineWidth = 2;
+        roundRect(ctx, left + 1, top + 1, DAY_COL_WIDTH - 2, height - 2, 4);
         ctx.stroke();
         ctx.restore();
 
-        const paneW = (DAY_COL_WIDTH - 3) / n;
+        const paneW = (DAY_COL_WIDTH - 2) / n;
         overlap.blocks.forEach((overlapBlock, blockIdx) => {
-            const paneX = left + 1.5 + blockIdx * paneW;
-            const paneY = top + 1.5;
-            const paneH = height - 3;
-            ctx.fillStyle = overlapBlock.color || '#38b2ac';
+            const paneX = left + 1 + blockIdx * paneW;
+            const paneY = top + 1;
+            const paneH = height - 2;
+            ctx.fillStyle = softenColor(overlapBlock.color || '#9fb6c0');
             ctx.fillRect(paneX, paneY, paneW, paneH);
             if (blockIdx > 0) {
-                ctx.strokeStyle = '#000';
+                ctx.strokeStyle = COLORS.blockStroke;
                 ctx.lineWidth = 1;
                 ctx.beginPath();
                 ctx.moveTo(paneX, paneY);
@@ -606,16 +707,125 @@ const renderScheduleCanvas = (opts: RenderOptions): HTMLCanvasElement => {
             drawBlockLabel(
                 ctx,
                 overlapBlock,
-                opts.type,
-                !!opts.hideTeacherNames,
+                type,
+                hideTeacherNames,
                 paneX,
                 paneY,
                 paneW,
                 paneH,
-                true
+                true,
+                currentTeacherName
             );
         });
     });
+};
+
+const renderScheduleCanvas = (opts: RenderOptions): HTMLCanvasElement => {
+    const showEndTime = !!opts.showEndTime;
+    const showHours = opts.type === 'Teacher' && opts.includeHours && opts.hours;
+    const splitFriday = shouldUseSeparateFridayTimes(opts.blocks);
+    const timeCols = showEndTime ? 2 : 1;
+
+    const monThuBlocks = opts.blocks.filter((b) =>
+        (MON_THU_DAYS as readonly string[]).includes(b.start.day)
+    );
+    const fridayBlocks = opts.blocks.filter((b) => b.start.day === 'Friday');
+
+    const mainAxis = splitFriday
+        ? buildTimeAxis(monThuBlocks.length ? monThuBlocks : opts.blocks)
+        : buildTimeAxis(opts.blocks);
+    const fridayAxis = splitFriday ? buildTimeAxis(fridayBlocks.length ? fridayBlocks : opts.blocks) : null;
+
+    const mainDays = splitFriday ? MON_THU_DAYS : DAYS;
+    const mainGridW = TIME_COL_WIDTH * timeCols + DAY_COL_WIDTH * mainDays.length;
+    const fridayGridW = splitFriday && fridayAxis
+        ? TIME_COL_WIDTH * timeCols + DAY_COL_WIDTH
+        : 0;
+    const gridW = mainGridW + (splitFriday ? SECTION_GAP + fridayGridW : 0);
+    const gridH = Math.max(mainAxis.gridH, fridayAxis?.gridH || 0);
+
+    const titleBlockH = 34;
+    const contentW = gridW + (showHours ? HOURS_GAP + HOURS_WIDTH : 0);
+    const hoursH = showHours
+        ? 20 + (opts.excludeEmptyHours ? 16 : 0) + 70 + opts.hours!.days.length * 61
+        : 0;
+    const contentH = Math.max(gridH, hoursH);
+    const canvasW = PAGE_PAD * 2 + contentW;
+    const canvasH = PAGE_PAD * 2 + titleBlockH + contentH;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(canvasW * SCALE);
+    canvas.height = Math.ceil(canvasH * SCALE);
+    const ctx = canvas.getContext('2d')!;
+    ctx.scale(SCALE, SCALE);
+
+    // Soft page background
+    ctx.fillStyle = COLORS.pageBg;
+    ctx.fillRect(0, 0, canvasW, canvasH);
+
+    // Subtle top accent bar
+    ctx.fillStyle = COLORS.headerBg;
+    ctx.fillRect(0, 0, canvasW, 4);
+
+    // Title
+    const titleX = PAGE_PAD;
+    const titleY = PAGE_PAD + 4;
+    ctx.fillStyle = COLORS.title;
+    ctx.font = `700 20px ${FONT}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`${opts.type}: ${opts.name}`, titleX, titleY);
+
+    const gridX = PAGE_PAD;
+    const gridY = PAGE_PAD + titleBlockH;
+    const currentTeacherName = opts.type === 'Teacher' ? opts.name : undefined;
+
+    const mainDayLeft = (dayIndex: number) => gridX + TIME_COL_WIDTH * timeCols + dayIndex * DAY_COL_WIDTH;
+    const fridayTimeX = gridX + mainGridW + SECTION_GAP;
+    const fridayDayLeft = (_dayIndex: number) => fridayTimeX + TIME_COL_WIDTH * timeCols;
+
+    // —— Mon–Thu (or full week) panel ——
+    drawTimeColumns(
+        ctx,
+        mainAxis,
+        gridX,
+        gridY,
+        showEndTime,
+        splitFriday ? 'Mon–Thu' : 'Time'
+    );
+    drawDayHeadersAndCells(ctx, mainDays, mainDayLeft, gridY, mainAxis);
+    drawBlocksOnAxis(
+        ctx,
+        splitFriday ? monThuBlocks : opts.blocks,
+        mainDays,
+        mainDayLeft,
+        gridY,
+        mainAxis,
+        opts.type,
+        !!opts.hideTeacherNames,
+        currentTeacherName
+    );
+
+    // —— Friday panel with its own Time column ——
+    if (splitFriday && fridayAxis) {
+        // Soft vertical separator
+        ctx.fillStyle = COLORS.fridayDivider;
+        ctx.fillRect(gridX + mainGridW + SECTION_GAP / 2 - 0.5, gridY, 1, Math.min(gridH, fridayAxis.gridH));
+
+        drawTimeColumns(ctx, fridayAxis, fridayTimeX, gridY, showEndTime, 'Friday');
+        drawDayHeadersAndCells(ctx, ['Friday'], fridayDayLeft, gridY, fridayAxis);
+        drawBlocksOnAxis(
+            ctx,
+            fridayBlocks,
+            ['Friday'],
+            fridayDayLeft,
+            gridY,
+            fridayAxis,
+            opts.type,
+            !!opts.hideTeacherNames,
+            currentTeacherName
+        );
+    }
 
     if (showHours && opts.hours) {
         drawHoursPanel(
@@ -639,16 +849,15 @@ const addCanvasPage = (pdf: jsPDF, canvas: HTMLCanvasElement) => {
 
     const imgW = canvas.width;
     const imgH = canvas.height;
-    const ratio = Math.min(maxW / (imgW / SCALE), maxH / (imgH / SCALE));
-    // canvas is already scaled; convert CSS-pixel size
     const cssW = imgW / SCALE;
     const cssH = imgH / SCALE;
+    const ratio = Math.min(maxW / cssW, maxH / cssH);
     const drawW = cssW * ratio;
     const drawH = cssH * ratio;
     const x = (pageWidth - drawW) / 2;
     const y = (pageHeight - drawH) / 2;
 
-    const imgData = canvas.toDataURL('image/jpeg', 0.93);
+    const imgData = canvas.toDataURL('image/jpeg', 0.94);
     pdf.addImage(imgData, 'JPEG', x, y, drawW, drawH);
 };
 
@@ -729,7 +938,6 @@ export async function exportEntitiesSchedulesToPdf(params: {
         firstPage = false;
         addCanvasPage(pdf, canvas);
 
-        // yield so UI can update progress
         await new Promise((r) => setTimeout(r, 0));
     }
 

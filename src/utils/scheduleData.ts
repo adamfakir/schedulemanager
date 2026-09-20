@@ -8,6 +8,7 @@ import {
 /** Shared helpers for building schedule blocks used by PDF export. */
 
 export const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'] as const;
+export const MON_THU_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday'] as const;
 // Re-export for callers that imported from here historically
 export { PREP_COLOR, PREP_SUBJECT_ID };
 
@@ -363,4 +364,42 @@ export const buildSortedTimes = (blocks: ScheduleBlock[]): string[] => {
     }
     sorted = Array.from(new Set(expanded)).sort((a, b) => timeToMinutes(a) - timeToMinutes(b));
     return sorted;
+};
+
+/** Unique start/end times for a set of blocks (no hourly fillers). */
+const uniqueBoundaryTimes = (blocks: ScheduleBlock[]): Set<string> => {
+    const set = new Set<string>();
+    blocks.forEach((tb) => {
+        if (tb.start?.time) set.add(tb.start.time);
+        if (tb.end?.time) set.add(tb.end.time);
+    });
+    return set;
+};
+
+/**
+ * When Friday's period boundaries differ a lot from Mon–Thu, the shared time
+ * axis gets noisy. Prefer a separate Friday time column in that case.
+ */
+export const shouldUseSeparateFridayTimes = (blocks: ScheduleBlock[]): boolean => {
+    const monThu = blocks.filter((b) => (MON_THU_DAYS as readonly string[]).includes(b.start.day));
+    const friday = blocks.filter((b) => b.start.day === 'Friday');
+    if (!monThu.length || !friday.length) return false;
+
+    const monThuTimes = uniqueBoundaryTimes(monThu);
+    const fridayTimes = uniqueBoundaryTimes(friday);
+    if (fridayTimes.size < 2) return false;
+
+    let fridayOnly = 0;
+    fridayTimes.forEach((t) => {
+        if (!monThuTimes.has(t)) fridayOnly += 1;
+    });
+
+    const fridayOnlyRatio = fridayOnly / fridayTimes.size;
+    const combinedLen = buildSortedTimes(blocks).length;
+    const monThuLen = buildSortedTimes(monThu).length;
+    const fridayLen = buildSortedTimes(friday).length;
+    const rowsAddedByMerging = combinedLen - Math.max(monThuLen, fridayLen);
+
+    // Split when Friday introduces several unique times OR merging balloons the axis
+    return (fridayOnly >= 3 && fridayOnlyRatio >= 0.35) || rowsAddedByMerging >= 4;
 };
