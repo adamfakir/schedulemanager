@@ -350,15 +350,29 @@ export const buildSortedTimes = (blocks: ScheduleBlock[]): string[] => {
 
     let sorted = Array.from(set).sort((a, b) => timeToMinutes(a) - timeToMinutes(b));
 
-    // Fill large gaps with hourly labels (matches ScheduleItem feel)
+    // Only fill empty gaps — occupied class spans stay continuous (up to 1.5h+).
+    const isOccupied = (startMin: number, endMin: number) =>
+        blocks.some((tb) => {
+            if (!tb.start?.time || !tb.end?.time) return false;
+            const tbStart = timeToMinutes(tb.start.time);
+            const tbEnd = timeToMinutes(tb.end.time);
+            return !(tbEnd <= startMin || tbStart >= endMin);
+        });
+
+    // Allow empty stretches up to 90 min before inserting a filler tick
+    const MAX_EMPTY_SPAN = 90;
     const expanded: string[] = [];
     for (let i = 0; i < sorted.length; i++) {
         expanded.push(sorted[i]);
         if (i < sorted.length - 1) {
             const cur = timeToMinutes(sorted[i]);
             const next = timeToMinutes(sorted[i + 1]);
-            for (let t = Math.ceil((cur + 1) / 60) * 60; t < next; t += 60) {
-                expanded.push(minutesToTime(t));
+            if (!isOccupied(cur, next)) {
+                let current = cur;
+                while (current + MAX_EMPTY_SPAN < next) {
+                    current += MAX_EMPTY_SPAN;
+                    expanded.push(minutesToTime(current));
+                }
             }
         }
     }
@@ -366,7 +380,7 @@ export const buildSortedTimes = (blocks: ScheduleBlock[]): string[] => {
     return sorted;
 };
 
-/** Unique start/end times for a set of blocks (no hourly fillers). */
+/** Unique start/end times for a set of blocks (no gap fillers). */
 const uniqueBoundaryTimes = (blocks: ScheduleBlock[]): Set<string> => {
     const set = new Set<string>();
     blocks.forEach((tb) => {
@@ -377,8 +391,9 @@ const uniqueBoundaryTimes = (blocks: ScheduleBlock[]): Set<string> => {
 };
 
 /**
- * When Friday's period boundaries differ a lot from Mon–Thu, the shared time
- * axis gets noisy. Prefer a separate Friday time column in that case.
+ * Split Friday into its own time column only when Friday's boundaries would
+ * actually inflate the shared Mon–Thu axis. If Mon–Thu already covers Friday,
+ * keep one axis — a separate Friday column would be redundant.
  */
 export const shouldUseSeparateFridayTimes = (blocks: ScheduleBlock[]): boolean => {
     const monThu = blocks.filter((b) => (MON_THU_DAYS as readonly string[]).includes(b.start.day));
@@ -393,13 +408,12 @@ export const shouldUseSeparateFridayTimes = (blocks: ScheduleBlock[]): boolean =
     fridayTimes.forEach((t) => {
         if (!monThuTimes.has(t)) fridayOnly += 1;
     });
+    if (fridayOnly < 2) return false;
 
-    const fridayOnlyRatio = fridayOnly / fridayTimes.size;
+    // How many extra rows Mon–Thu would gain if forced onto a shared axis
     const combinedLen = buildSortedTimes(blocks).length;
     const monThuLen = buildSortedTimes(monThu).length;
-    const fridayLen = buildSortedTimes(friday).length;
-    const rowsAddedByMerging = combinedLen - Math.max(monThuLen, fridayLen);
+    const monThuPollution = combinedLen - monThuLen;
 
-    // Split when Friday introduces several unique times OR merging balloons the axis
-    return (fridayOnly >= 3 && fridayOnlyRatio >= 0.35) || rowsAddedByMerging >= 4;
+    return monThuPollution >= 3;
 };

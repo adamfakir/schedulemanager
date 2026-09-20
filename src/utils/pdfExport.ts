@@ -731,10 +731,10 @@ const renderScheduleCanvas = (opts: RenderOptions): HTMLCanvasElement => {
     );
     const fridayBlocks = opts.blocks.filter((b) => b.start.day === 'Friday');
 
-    const mainAxis = splitFriday
-        ? buildTimeAxis(monThuBlocks.length ? monThuBlocks : opts.blocks)
-        : buildTimeAxis(opts.blocks);
-    const fridayAxis = splitFriday ? buildTimeAxis(fridayBlocks.length ? fridayBlocks : opts.blocks) : null;
+    // When split: Mon–Thu axis uses ONLY Mon–Thu blocks; Friday uses ONLY Friday.
+    // Never fall back to all-week blocks — that would re-pollute Mon–Thu with Friday times.
+    const mainAxis = splitFriday ? buildTimeAxis(monThuBlocks) : buildTimeAxis(opts.blocks);
+    const fridayAxis = splitFriday ? buildTimeAxis(fridayBlocks) : null;
 
     const mainDays = splitFriday ? MON_THU_DAYS : DAYS;
     const mainGridW = TIME_COL_WIDTH * timeCols + DAY_COL_WIDTH * mainDays.length;
@@ -774,7 +774,11 @@ const renderScheduleCanvas = (opts: RenderOptions): HTMLCanvasElement => {
     ctx.font = `700 20px ${FONT}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText(`${opts.type}: ${opts.name}`, titleX, titleY);
+    ctx.fillText(
+        opts.type === 'Student' ? opts.name : `${opts.type}: ${opts.name}`,
+        titleX,
+        titleY
+    );
 
     const gridX = PAGE_PAD;
     const gridY = PAGE_PAD + titleBlockH;
