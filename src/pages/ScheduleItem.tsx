@@ -482,6 +482,8 @@ function ScheduleItem() {
         side: 'swap' | 'replace';
     } | null>(null);
     const [draggedBlockIndex, setDraggedBlockIndex] = useState<number | null>(null);
+    /** Shift held at grab → drop creates a copy instead of moving. */
+    const duplicateOnDropRef = useRef(false);
     const teacherCacheRef = useRef<any[] | null>(null);
     const [showEndTime, setShowEndTime] = useState<boolean>(false);
     const [hideTeacherNames, setHideTeacherNames] = useState<boolean>(false);
@@ -639,9 +641,15 @@ function ScheduleItem() {
         // Safari can cancel an HTML drag if React re-renders the source element
         // while the browser is still establishing the drag session. Populate the
         // DataTransfer synchronously, then defer UI/cache state until the next frame.
-        e.dataTransfer.effectAllowed = "move";
+        // Shift at grab = duplicate on drop (keeps original). Mid-drag Shift alone
+        // still only does fine snap when moving.
+        duplicateOnDropRef.current = !!e.shiftKey;
+        e.dataTransfer.effectAllowed = duplicateOnDropRef.current ? "copyMove" : "move";
         e.dataTransfer.setData("existing_block_index", blockIndex.toString());
         e.dataTransfer.setData("text/plain", blockIndex.toString());
+        if (duplicateOnDropRef.current) {
+            e.dataTransfer.setData("duplicate_block", "1");
+        }
 
         requestAnimationFrame(() => {
             setDraggedSubjectId(block.subjectId);
@@ -2367,22 +2375,35 @@ function ScheduleItem() {
         if (existingIndexStr) {
             const index = parseInt(existingIndexStr);
             const block = timeblocks[index];
+            if (!block) return;
             const subjectId = block.subjectId;
             const duration = timeToMinutes(block.end.time) - timeToMinutes(block.start.time);
             const newEndMin = timeToMinutes(time) + duration;
             const newEnd = minutesToTime(newEndMin);
+            const shouldDuplicate =
+                duplicateOnDropRef.current || e.dataTransfer.getData("duplicate_block") === "1";
 
-            const updatedBlock = {
+            const placedBlock = {
                 ...block,
                 start: { day, time },
-                end: { day, time: newEnd }
+                end: { day, time: newEnd },
             };
 
-            const newTimeblocks = [...timeblocks];
-            newTimeblocks[index] = updatedBlock;
+            let newTimeblocks: any[];
+            if (shouldDuplicate) {
+                const tid = getOrCreateTimeblockId({});
+                newTimeblocks = [
+                    ...timeblocks,
+                    { ...placedBlock, timeblockId: tid, blockid: tid },
+                ];
+            } else {
+                newTimeblocks = [...timeblocks];
+                newTimeblocks[index] = placedBlock;
+            }
 
             // Update state optimistically
             setTimeblocks(newTimeblocks);
+            duplicateOnDropRef.current = false;
 
             try {
                 if (isOfficeOwnedBlock(block)) {
@@ -2408,7 +2429,7 @@ function ScheduleItem() {
                     }, subjectId);
                 }
             } catch (err) {
-                console.error("Move failed:", err);
+                console.error(shouldDuplicate ? "Duplicate failed:" : "Move failed:", err);
                 // Revert on error
                 setTimeblocks(timeblocks);
             }
@@ -2851,6 +2872,7 @@ function ScheduleItem() {
                                             e.stopPropagation();
                                             setShiftHeld(e.shiftKey);
                                             setCmdHeld(e.metaKey || e.ctrlKey);
+                                            e.dataTransfer.dropEffect = duplicateOnDropRef.current ? "copy" : "move";
                                             const subjectId = getDraggedSubjectId();
                                             if (!subjectId) return;
 
@@ -2891,7 +2913,7 @@ function ScheduleItem() {
                                         onDrop={(e) => {
                                             e.preventDefault();
                                             e.stopPropagation();
-                                            e.dataTransfer.dropEffect = "move"; // 👈 this tells the browser it was a successful drop
+                                            e.dataTransfer.dropEffect = duplicateOnDropRef.current ? "copy" : "move";
                                             setDraggedTeacherBusy([]);
                                             setOverlappingTeacherSchedules([]);
                                             setDraggedBlockIndex(null);
@@ -2902,6 +2924,7 @@ function ScheduleItem() {
                                             setStableHoverTime(null);
                                             setShiftHeld(false);
                                             setCmdHeld(false);
+                                            duplicateOnDropRef.current = false;
                                         }}
                                         onDragEnd={() => {
                                             setDragHover(null);
@@ -2912,6 +2935,7 @@ function ScheduleItem() {
                                             setSwapReplaceHover(null);
                                             setDraggedBlockIndex(null);
                                             setDraggedTeacherBusy([]);
+                                            duplicateOnDropRef.current = false;
                                         }}
 
                                     />
@@ -3044,6 +3068,7 @@ function ScheduleItem() {
                                         setDragHover(null); setHoverSubject(null); setLoadedSubjectId(null);
                                         setSelectedBlockIndex(null); setOverlappingTeacherSchedules([]);
                                         setSwapReplaceHover(null); setDraggedBlockIndex(null); setDraggedTeacherBusy([]);
+                                        duplicateOnDropRef.current = false;
                                     }}
                                 >
                                     {swapReplaceHover && swapReplaceHover.blockIndex === i && (
@@ -3163,6 +3188,7 @@ function ScheduleItem() {
                                                     }}
                                                     onDragEnd={() => {
                                                         setDragHover(null); setHoverSubject(null); setLoadedSubjectId(null); setSelectedBlockIndex(null); setOverlappingTeacherSchedules([]); setSwapReplaceHover(null); setDraggedBlockIndex(null); setDraggedTeacherBusy([]);
+                                                        duplicateOnDropRef.current = false;
                                                     }}
                                                 >
                                                     {swapReplaceHover && swapReplaceHover.blockIndex === originalBlockIndex && (
@@ -3297,6 +3323,7 @@ function ScheduleItem() {
                                 setSwapReplaceHover(null);
                                 setDraggedBlockIndex(null);
                                 setDraggedTeacherBusy([]);
+                                duplicateOnDropRef.current = false;
                             }}
                         >
                             {/* SWAP/REPLACE Overlay */}
