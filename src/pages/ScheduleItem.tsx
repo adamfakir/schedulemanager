@@ -12,6 +12,12 @@ import { usePageTitle } from '../utils/usePageTitle';
 import { exportScheduleToExcel } from '../utils/excelExport';
 import { API_BASE, getCache, loadAllSubjects, loadAllTeachers, loadStudentById, loadSubjectById, loadTeacherById, setCache } from '../utils/apiClient';
 import {
+    SECTIONS,
+    inferSubjectSection,
+    sectionLabel,
+    type SectionId,
+} from '../utils/sections';
+import {
     PREP_SUBJECT_ID,
     PREP_DEFAULT_MINUTES,
     PREP_COLOR,
@@ -869,6 +875,8 @@ function ScheduleItem() {
         start: string;
         end: string;
         displayclass?: string;
+        /** Empty string = auto (infer from name); otherwise a SectionId */
+        section?: string;
     } | null>(null);
     // ↪️ near top of ScheduleItem()
     const stableSortedTimesRef = useRef<string[]>([]);
@@ -1281,6 +1289,7 @@ function ScheduleItem() {
                             template_id: String(t.template_id || ''),
                             name: t.name || 'Note',
                             color: t.color || DEFAULT_CUSTOM_COLOR,
+                            section: String(t.section || ''),
                         })).filter((t: any) => t.template_id)
                     );
 
@@ -1319,6 +1328,7 @@ function ScheduleItem() {
                         const subjects = batchRes.data;
                         const requiredSet = new Set((teacher.required_teach || []).map((sid: any) => sid.$oid || sid));
                         const fixedLabelMap = getFixedBlockLabelMap(teacher);
+                        const blockSectionMap = getBlockSectionMap(teacher);
                         for (const subj of subjects) {
                             (subj.timeblocks || []).forEach((tb: any) => {
                                 const tbId = getTimeblockId(tb) || getOrCreateTimeblockId(tb);
@@ -1328,6 +1338,7 @@ function ScheduleItem() {
                                 }
                                 const labelKey = `${subjId}|${tbId}`;
                                 const hasOverride = fixedLabelMap.has(labelKey);
+                                const hasSectionOverride = blockSectionMap.has(labelKey);
                                 blocks.push({
                                     subjectId: subjId,
                                     ...tb,
@@ -1338,6 +1349,8 @@ function ScheduleItem() {
                                         ? fixedLabelMap.get(labelKey)
                                         : (subj.displayclass || ''),
                                     isFixed: !!subj.fixed,
+                                    sectionOverride: hasSectionOverride ? blockSectionMap.get(labelKey) : undefined,
+                                    inferredSection: inferSubjectSection(subj),
                                 });
                             });
                         }
@@ -1908,6 +1921,8 @@ function ScheduleItem() {
             start,
             end,
             displayclass: block?.displayclass || '',
+            // '' means auto; only set when this teacher has an explicit override
+            section: block?.sectionOverride != null ? String(block.sectionOverride) : '',
         });
     };
 
@@ -1918,6 +1933,17 @@ function ScheduleItem() {
             const bid = String(lb?.blockid || lb?.timeblockId || '');
             if (!sid || !bid) continue;
             map.set(`${sid}|${bid}`, String(lb?.displayclass ?? ''));
+        }
+        return map;
+    };
+
+    const getBlockSectionMap = (teacher: any): Map<string, string> => {
+        const map = new Map<string, string>();
+        for (const ov of (teacher?.block_sections || [])) {
+            const sid = getSubjectIdRef(ov?.subject);
+            const bid = String(ov?.blockid || ov?.timeblockId || '');
+            if (!sid || !bid) continue;
+            map.set(`${sid}|${bid}`, String(ov?.section || 'other'));
         }
         return map;
     };
@@ -1942,6 +1968,35 @@ function ScheduleItem() {
             { headers: { Authorization: token } }
         );
         setItem((prev: any) => (prev ? { ...prev, fixed_block_labels: next } : prev));
+        await updateTeacherCacheFromBackend(teacherId);
+    };
+
+    /** Persist or clear a per-teacher per-block section. Empty section clears the override. */
+    const saveBlockSection = async (subjectId: string, blockId: string, section: string) => {
+        const teacherId = getTeacherId();
+        const token = localStorage.getItem('user_token');
+        if (!token || !teacherId || !subjectId || !blockId) return;
+        const existing = Array.isArray(item?.block_sections) ? [...item.block_sections] : [];
+        const key = `${subjectId}|${blockId}`;
+        let next = existing
+            .map((ov: any) => ({
+                subject: getSubjectIdRef(ov?.subject),
+                blockid: String(ov?.blockid || ov?.timeblockId || ''),
+                section: String(ov?.section || 'other'),
+            }))
+            .filter((ov: any) => ov.subject && ov.blockid && `${ov.subject}|${ov.blockid}` !== key);
+        if (section) {
+            next.push({ subject: subjectId, blockid: blockId, section });
+        }
+        await axios.put(
+            `${API_BASE}/teacher/${teacherId}/update`,
+            { block_sections: next },
+            { headers: { Authorization: token } }
+        );
+        setItem((prev: any) => (prev ? { ...prev, block_sections: next } : prev));
+        window.dispatchEvent(new CustomEvent('teacherBlockSectionsUpdated', {
+            detail: { teacherId, block_sections: next },
+        }));
         await updateTeacherCacheFromBackend(teacherId);
     };
 
@@ -2509,6 +2564,7 @@ function ScheduleItem() {
             if (item?.type !== "Teacher") return;
             const templateId = String(dragged?.templateId || e.dataTransfer.getData('template_id') || getTemplateIdFromBlock({ subjectId }));
             if (!templateId) return;
+            const tpl = (customBlockTemplates || []).find((t: any) => String(t.template_id) === templateId);
             const startMin = timeToMinutes(time);
             const endTime = minutesToTime(startMin + OFFICE_DEFAULT_MINUTES);
             const tid = getOrCreateTimeblockId({});
@@ -2520,8 +2576,9 @@ function ScheduleItem() {
                 end: { day, time: endTime },
                 timeblockId: tid,
                 blockid: tid,
-                color: dragged?.color || DEFAULT_CUSTOM_COLOR,
-                name: dragged?.name || 'Note',
+                color: dragged?.color || tpl?.color || DEFAULT_CUSTOM_COLOR,
+                name: dragged?.name || tpl?.name || 'Note',
+                section: String(dragged?.section ?? tpl?.section ?? ''),
                 displayclass: '',
             };
             const newTimeblocks = [...timeblocks, newBlock];
@@ -3720,6 +3777,36 @@ function ScheduleItem() {
                                         </Text>
                                     </Box>
                                 )}
+                                {item?.type === "Teacher" && !isOfficeOwnedBlock(block) && (
+                                    <Box fontSize="xs" color="gray.700" borderTop="1px solid" borderColor="gray.200" pt={1.5}>
+                                        <Text fontWeight="semibold" mb={1} fontSize="xs">Section</Text>
+                                        <Box
+                                            as="select"
+                                            value={editingBlock.section ?? ''}
+                                            onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+                                                setEditingBlock({ ...editingBlock, section: e.target.value })
+                                            }
+                                            fontSize="sm"
+                                            h="32px"
+                                            w="100%"
+                                            border="1px solid"
+                                            borderColor="gray.300"
+                                            borderRadius="md"
+                                            px={2}
+                                            bg="white"
+                                        >
+                                            <option value="">
+                                                Auto ({sectionLabel((block.inferredSection as SectionId) || 'other')})
+                                            </option>
+                                            {SECTIONS.map((s) => (
+                                                <option key={s.id} value={s.id}>{s.label}</option>
+                                            ))}
+                                        </Box>
+                                        <Text fontSize="2xs" color="gray.500" mt={1}>
+                                            Only this period on this teacher’s schedule
+                                        </Text>
+                                    </Box>
+                                )}
                                 {item?.type === "Teacher" && !block.isFixed && block.displayclass && (
                                     <Box fontSize="xs" color="gray.600">{cropSemesterTag(block.displayclass)}</Box>
                                 )}
@@ -3818,10 +3905,16 @@ function ScheduleItem() {
                                             item?.type === 'Teacher' &&
                                             !!block.isFixed &&
                                             nextDisplayclass !== (block.displayclass || '');
+                                        const nextSection = editingBlock.section ?? '';
+                                        const prevSection = block.sectionOverride != null ? String(block.sectionOverride) : '';
+                                        const hasSectionChanged =
+                                            item?.type === 'Teacher' &&
+                                            !isOfficeOwnedBlock(block) &&
+                                            nextSection !== prevSection;
 
                                         if (!token) return;
 
-                                        if (!hasTimeChanged && !hasTeacherChanges && !hasFixedLabelChanged) {
+                                        if (!hasTimeChanged && !hasTeacherChanges && !hasFixedLabelChanged && !hasSectionChanged) {
                                             setEditingBlock(null);
                                             return;
                                         }
@@ -3831,6 +3924,11 @@ function ScheduleItem() {
                                             start: { ...block.start, time: editingBlock.start },
                                             end: { ...block.end, time: editingBlock.end },
                                             ...(hasFixedLabelChanged ? { displayclass: nextDisplayclass } : {}),
+                                            ...(hasSectionChanged
+                                                ? {
+                                                    sectionOverride: nextSection || undefined,
+                                                }
+                                                : {}),
                                         };
 
                                         const newTimeblocks = [...timeblocks];
@@ -3838,7 +3936,7 @@ function ScheduleItem() {
                                         const touchedSubjectIds = [subjectIdForBlock];
 
                                         // Immediate local feedback on save click.
-                                        if (hasTimeChanged || hasFixedLabelChanged) {
+                                        if (hasTimeChanged || hasFixedLabelChanged || hasSectionChanged) {
                                             setTimeblocks(newTimeblocks);
                                         }
                                         if (hasTeacherChanges) {
@@ -3887,6 +3985,10 @@ function ScheduleItem() {
 
                                                     if (hasFixedLabelChanged) {
                                                         await saveFixedBlockLabel(subjectIdForBlock, blockIdForEdit, nextDisplayclass);
+                                                    }
+
+                                                    if (hasSectionChanged) {
+                                                        await saveBlockSection(subjectIdForBlock, blockIdForEdit, nextSection);
                                                     }
 
                                                     if (hasTeacherChanges) {

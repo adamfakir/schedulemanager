@@ -11,6 +11,7 @@ export type CustomBlockTemplate = {
     template_id: string;
     name: string;
     color: string;
+    section?: string;
 };
 
 export type MeetingRecord = {
@@ -18,6 +19,7 @@ export type MeetingRecord = {
     id?: string;
     name: string;
     color: string;
+    section?: string;
     teacher_ids: string[];
     teacher_names?: string[];
     timeblocks?: any[];

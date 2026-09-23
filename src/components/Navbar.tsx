@@ -33,7 +33,47 @@ import {
     meetingSubjectId,
     customSubjectId,
 } from '../utils/officeBlocks';
+import {
+    SECTIONS,
+    computeSectionBreakdown,
+    sectionLabel,
+    type SectionId,
+} from '../utils/sections';
 import ScheduleEditPanel from './ScheduleEditPanel';
+
+const SECTION_SELECT_OPTIONS = [
+    { value: '', label: 'Other (unassigned)' },
+    ...SECTIONS.filter((s) => s.id !== 'other').map((s) => ({ value: s.id, label: s.label })),
+];
+
+const SectionSelect = ({
+    value,
+    onChange,
+    size = 'sm',
+    bg,
+}: {
+    value: string;
+    onChange: (v: string) => void;
+    size?: string;
+    bg?: string;
+}) => (
+    <Box as="select"
+        value={value || ''}
+        onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange(e.target.value)}
+        fontSize={size === 'sm' ? 'sm' : 'md'}
+        h="32px"
+        w="100%"
+        border="1px solid"
+        borderColor="gray.300"
+        borderRadius="md"
+        px={2}
+        bg={bg || 'white'}
+    >
+        {SECTION_SELECT_OPTIONS.map((opt) => (
+            <option key={opt.value || 'other'} value={opt.value}>{opt.label}</option>
+        ))}
+    </Box>
+);
 
 const Navbar = () => {
     const navigate = useNavigate();
@@ -54,16 +94,24 @@ const Navbar = () => {
     const [allTeachers, setAllTeachers] = useState<any[]>([]);
     const [meetingName, setMeetingName] = useState('');
     const [meetingColor, setMeetingColor] = useState(DEFAULT_MEETING_COLOR);
+    const [meetingSection, setMeetingSection] = useState('');
     const [meetingTeacherIds, setMeetingTeacherIds] = useState<string[]>([]);
     const [meetingTeacherSearch, setMeetingTeacherSearch] = useState('');
     const [editingMeetingId, setEditingMeetingId] = useState<string | null>(null);
     const [editMeetingName, setEditMeetingName] = useState('');
     const [editMeetingColor, setEditMeetingColor] = useState(DEFAULT_MEETING_COLOR);
+    const [editMeetingSection, setEditMeetingSection] = useState('');
     const [editMeetingTeacherIds, setEditMeetingTeacherIds] = useState<string[]>([]);
     const [editMeetingSearch, setEditMeetingSearch] = useState('');
     const [savingMeetingEdit, setSavingMeetingEdit] = useState(false);
     const [customDraftName, setCustomDraftName] = useState('');
     const [customDraftColor, setCustomDraftColor] = useState(DEFAULT_CUSTOM_COLOR);
+    const [customDraftSection, setCustomDraftSection] = useState('');
+    const [editingCustomTemplateId, setEditingCustomTemplateId] = useState<string | null>(null);
+    const [editCustomName, setEditCustomName] = useState('');
+    const [editCustomColor, setEditCustomColor] = useState(DEFAULT_CUSTOM_COLOR);
+    const [editCustomSection, setEditCustomSection] = useState('');
+    const [savingCustomEdit, setSavingCustomEdit] = useState(false);
     const [creatingMeeting, setCreatingMeeting] = useState(false);
     const [savingCustomTemplate, setSavingCustomTemplate] = useState(false);
     const formatTime = (time: string): string => {
@@ -218,6 +266,17 @@ const Navbar = () => {
         }
     };
     useEffect(() => {
+        const onBlockSections = (e: Event) => {
+            const detail = (e as CustomEvent).detail || {};
+            const teacherId = String(detail.teacherId || '');
+            const currentId = String(item?._id?.$oid || item?._id || scheduleId || '');
+            if (!teacherId || item?.type !== 'Teacher' || teacherId !== currentId) return;
+            setItem((prev: any) => (prev ? { ...prev, block_sections: detail.block_sections || [] } : prev));
+        };
+        window.addEventListener('teacherBlockSectionsUpdated', onBlockSections);
+        return () => window.removeEventListener('teacherBlockSectionsUpdated', onBlockSections);
+    }, [item?.type, item?._id, scheduleId]);
+    useEffect(() => {
         const token = localStorage.getItem('user_token');
         if (!isSchedulePage || !location.pathname.startsWith('/schedule/')) return;
         if (!token) return;
@@ -281,6 +340,7 @@ const Navbar = () => {
                     template_id: String(t.template_id || t.id || ''),
                     name: t.name || 'Note',
                     color: t.color || DEFAULT_CUSTOM_COLOR,
+                    section: String(t.section || ''),
                 }));
                 setCustomBlockTemplates(templates.filter((t: any) => t.template_id));
                 setCustomTimeblocks(teacherData.custom_timeblocks || []);
@@ -1001,13 +1061,20 @@ const Navbar = () => {
                                                 try {
                                                     const res = await axios.post(
                                                         `${API_BASE}/meeting/create`,
-                                                        { name, color: meetingColor, teacher_ids: ids, timeblocks: [] },
+                                                        {
+                                                            name,
+                                                            color: meetingColor,
+                                                            section: meetingSection || '',
+                                                            teacher_ids: ids,
+                                                            timeblocks: [],
+                                                        },
                                                         { headers: { Authorization: token } }
                                                     );
                                                     const created = res.data?.meeting;
                                                     if (created) setMeetings([created, ...(meetings || [])]);
                                                     setMeetingName('');
                                                     setMeetingColor(DEFAULT_MEETING_COLOR);
+                                                    setMeetingSection('');
                                                     setMeetingTeacherIds([teacherId]);
                                                 } catch (err) {
                                                     console.error('Failed to create meeting', err);
@@ -1023,11 +1090,17 @@ const Navbar = () => {
                                                 try {
                                                     const next = [
                                                         ...(customBlockTemplates || []),
-                                                        { template_id: newTemplateId(), name, color: customDraftColor || DEFAULT_CUSTOM_COLOR },
+                                                        {
+                                                            template_id: newTemplateId(),
+                                                            name,
+                                                            color: customDraftColor || DEFAULT_CUSTOM_COLOR,
+                                                            section: customDraftSection || '',
+                                                        },
                                                     ];
                                                     await saveTemplates(next);
                                                     setCustomDraftName('');
                                                     setCustomDraftColor(DEFAULT_CUSTOM_COLOR);
+                                                    setCustomDraftSection('');
                                                 } catch (err) {
                                                     console.error('Failed to save custom template', err);
                                                 } finally {
@@ -1074,6 +1147,7 @@ const Navbar = () => {
                                                 setEditingMeetingId(mid);
                                                 setEditMeetingName(m.name || 'Meeting');
                                                 setEditMeetingColor(m.color || DEFAULT_MEETING_COLOR);
+                                                setEditMeetingSection(String(m.section || ''));
                                                 setEditMeetingTeacherIds((m.teacher_ids || []).map(String));
                                                 setEditMeetingSearch('');
                                             };
@@ -1093,6 +1167,7 @@ const Navbar = () => {
                                                         {
                                                             name: editMeetingName.trim() || 'Meeting',
                                                             color: editMeetingColor || DEFAULT_MEETING_COLOR,
+                                                            section: editMeetingSection || '',
                                                             teacher_ids: ids,
                                                         },
                                                         { headers: { Authorization: token } }
@@ -1124,6 +1199,62 @@ const Navbar = () => {
                                                     console.error('Failed to update meeting', err);
                                                 } finally {
                                                     setSavingMeetingEdit(false);
+                                                }
+                                            };
+
+                                            const startEditCustomTemplate = (tpl: any) => {
+                                                setEditingCustomTemplateId(tpl.template_id);
+                                                setEditCustomName(tpl.name || 'Note');
+                                                setEditCustomColor(tpl.color || DEFAULT_CUSTOM_COLOR);
+                                                setEditCustomSection(String(tpl.section || ''));
+                                            };
+
+                                            const cancelEditCustomTemplate = () => {
+                                                setEditingCustomTemplateId(null);
+                                            };
+
+                                            const saveCustomTemplateEdit = async () => {
+                                                if (!editingCustomTemplateId || !teacherId) return;
+                                                setSavingCustomEdit(true);
+                                                try {
+                                                    const section = editCustomSection || '';
+                                                    const name = editCustomName.trim() || 'Note';
+                                                    const color = editCustomColor || DEFAULT_CUSTOM_COLOR;
+                                                    const next = (customBlockTemplates || []).map((t) =>
+                                                        t.template_id === editingCustomTemplateId
+                                                            ? { ...t, name, color, section }
+                                                            : t
+                                                    );
+                                                    const nextBlocks = (customTimeblocks || []).map((tb: any) => {
+                                                        const tid = String(tb?.template_id || tb?.templateId || '');
+                                                        if (tid !== editingCustomTemplateId) return tb;
+                                                        return { ...tb, name, color, section };
+                                                    });
+                                                    await axios.put(
+                                                        `${API_BASE}/teacher/${teacherId}/update`,
+                                                        {
+                                                            custom_block_templates: next,
+                                                            custom_timeblocks: nextBlocks.map((tb: any) => ({
+                                                                startday: tb.start?.day || tb.startday,
+                                                                starttime: tb.start?.time || tb.starttime,
+                                                                endday: tb.end?.day || tb.endday,
+                                                                endtime: tb.end?.time || tb.endtime,
+                                                                blockid: tb.timeblockId || tb.blockid || tb.id,
+                                                                template_id: String(tb.template_id || tb.templateId || ''),
+                                                                name: tb.name,
+                                                                color: tb.color || DEFAULT_CUSTOM_COLOR,
+                                                                section: String(tb.section || ''),
+                                                            })),
+                                                        },
+                                                        { headers: { Authorization: token } }
+                                                    );
+                                                    setCustomBlockTemplates(next);
+                                                    setCustomTimeblocks(nextBlocks);
+                                                    setEditingCustomTemplateId(null);
+                                                } catch (err) {
+                                                    console.error('Failed to update custom template', err);
+                                                } finally {
+                                                    setSavingCustomEdit(false);
                                                 }
                                             };
 
@@ -1202,6 +1333,8 @@ const Navbar = () => {
                                                                     h="32px"
                                                                 />
                                                             </HStack>
+                                                            <Text fontSize="xs" fontWeight="bold">Section</Text>
+                                                            <SectionSelect value={meetingSection} onChange={setMeetingSection} />
                                                             <Text fontSize="xs" fontWeight="bold">Teachers</Text>
                                                             <Input
                                                                 size="sm"
@@ -1341,6 +1474,8 @@ const Navbar = () => {
                                                                                         h="32px"
                                                                                     />
                                                                                 </HStack>
+                                                                                <Text fontSize="xs" fontWeight="bold">Section</Text>
+                                                                                <SectionSelect value={editMeetingSection} onChange={setEditMeetingSection} />
                                                                                 <Text fontSize="xs" fontWeight="bold">Teachers</Text>
                                                                                 <Input
                                                                                     size="sm"
@@ -1406,6 +1541,9 @@ const Navbar = () => {
                                                                                 <Text fontSize="xs" color="gray.700" textAlign="center">
                                                                                     {names.join(', ') || 'No teachers'}
                                                                                 </Text>
+                                                                                <Text fontSize="xs" color="gray.600">
+                                                                                    {sectionLabel((m.section as SectionId) || 'other')}
+                                                                                </Text>
                                                                                 <Text fontSize="xs" color="gray.500">Hold ⌘ while dragging to preview</Text>
                                                                             </VStack>
                                                                         )}
@@ -1426,6 +1564,8 @@ const Navbar = () => {
                                                                 value={customDraftName}
                                                                 onChange={(e) => setCustomDraftName(e.target.value)}
                                                             />
+                                                            <Text fontSize="xs" fontWeight="bold">Section</Text>
+                                                            <SectionSelect value={customDraftSection} onChange={setCustomDraftSection} />
                                                             <HStack>
                                                                 <Text fontSize="sm" minW="40px">Color</Text>
                                                                 <Input
@@ -1448,19 +1588,25 @@ const Navbar = () => {
                                                             </HStack>
                                                         </VStack>
                                                         <VStack align="stretch" spacing={2}>
-                                                            {(customBlockTemplates || []).map((tpl) => (
+                                                            {(customBlockTemplates || []).map((tpl) => {
+                                                                const isEditing = editingCustomTemplateId === tpl.template_id;
+                                                                return (
                                                                 <Box
                                                                     key={tpl.template_id}
                                                                     w="100%"
-                                                                    bg={tpl.color || DEFAULT_CUSTOM_COLOR}
+                                                                    bg={isEditing ? (editCustomColor || tpl.color || DEFAULT_CUSTOM_COLOR) : (tpl.color || DEFAULT_CUSTOM_COLOR)}
                                                                     color="black"
                                                                     px={2}
                                                                     py={3}
                                                                     border="1px solid black"
                                                                     borderRadius="md"
                                                                     position="relative"
-                                                                    draggable
+                                                                    draggable={!isEditing}
                                                                     onDragStart={(e: React.DragEvent) => {
+                                                                        if (isEditing) {
+                                                                            e.preventDefault();
+                                                                            return;
+                                                                        }
                                                                         const sid = customSubjectId(tpl.template_id);
                                                                         e.dataTransfer.setData("subject_id", sid);
                                                                         e.dataTransfer.setData("template_id", tpl.template_id);
@@ -1471,6 +1617,7 @@ const Navbar = () => {
                                                                             name: tpl.name,
                                                                             displayname: tpl.name,
                                                                             color: tpl.color || DEFAULT_CUSTOM_COLOR,
+                                                                            section: tpl.section || '',
                                                                             minld: OFFICE_DEFAULT_MINUTES,
                                                                             maxld: OFFICE_DEFAULT_MINUTES,
                                                                         });
@@ -1479,29 +1626,89 @@ const Navbar = () => {
                                                                     onDragEnd={() => {
                                                                         window.dispatchEvent(new CustomEvent("clearDragPreview"));
                                                                     }}
-                                                                    cursor="grab"
-                                                                    _hover={{ opacity: 0.9 }}
+                                                                    cursor={isEditing ? "default" : "grab"}
+                                                                    _hover={{ opacity: isEditing ? 1 : 0.9 }}
                                                                 >
-                                                                    <Button
-                                                                        size="xs"
-                                                                        position="absolute"
-                                                                        top={1}
-                                                                        right={1}
-                                                                        colorScheme="red"
-                                                                        variant="ghost"
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            deleteCustomTemplate(tpl.template_id);
-                                                                        }}
-                                                                    >
-                                                                        ×
-                                                                    </Button>
-                                                                    <VStack spacing={0} pr={4}>
-                                                                        <Text fontWeight="bold" fontSize="md">{tpl.name}</Text>
-                                                                        <Text fontSize="xs" color="gray.500">Drag to schedule</Text>
-                                                                    </VStack>
+                                                                    <HStack position="absolute" top={1} right={1} spacing={0}>
+                                                                        {!isEditing && (
+                                                                            <Button
+                                                                                size="xs"
+                                                                                colorScheme="blackAlpha"
+                                                                                variant="ghost"
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation();
+                                                                                    startEditCustomTemplate(tpl);
+                                                                                }}
+                                                                            >
+                                                                                Edit
+                                                                            </Button>
+                                                                        )}
+                                                                        <Button
+                                                                            size="xs"
+                                                                            colorScheme="red"
+                                                                            variant="ghost"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                deleteCustomTemplate(tpl.template_id);
+                                                                            }}
+                                                                        >
+                                                                            ×
+                                                                        </Button>
+                                                                    </HStack>
+                                                                    {isEditing ? (
+                                                                        <VStack align="stretch" spacing={2} pr={1} pt={5} onMouseDown={(e) => e.stopPropagation()}>
+                                                                            <Input
+                                                                                size="sm"
+                                                                                bg="white"
+                                                                                value={editCustomName}
+                                                                                onChange={(e) => setEditCustomName(e.target.value)}
+                                                                                placeholder="Label"
+                                                                            />
+                                                                            <HStack>
+                                                                                <Text fontSize="sm" minW="40px">Color</Text>
+                                                                                <Input
+                                                                                    type="color"
+                                                                                    value={editCustomColor}
+                                                                                    onChange={(e) => setEditCustomColor(e.target.value)}
+                                                                                    w="60px"
+                                                                                    p={0}
+                                                                                    h="32px"
+                                                                                />
+                                                                            </HStack>
+                                                                            <Text fontSize="xs" fontWeight="bold">Section</Text>
+                                                                            <SectionSelect value={editCustomSection} onChange={setEditCustomSection} />
+                                                                            <HStack>
+                                                                                <Button
+                                                                                    size="sm"
+                                                                                    colorScheme="teal"
+                                                                                    flex={1}
+                                                                                    isLoading={savingCustomEdit}
+                                                                                    onClick={saveCustomTemplateEdit}
+                                                                                >
+                                                                                    Save
+                                                                                </Button>
+                                                                                <Button
+                                                                                    size="sm"
+                                                                                    variant="outline"
+                                                                                    flex={1}
+                                                                                    onClick={cancelEditCustomTemplate}
+                                                                                    isDisabled={savingCustomEdit}
+                                                                                >
+                                                                                    Cancel
+                                                                                </Button>
+                                                                            </HStack>
+                                                                        </VStack>
+                                                                    ) : (
+                                                                        <VStack spacing={0} pr={10}>
+                                                                            <Text fontWeight="bold" fontSize="md">{tpl.name}</Text>
+                                                                            <Text fontSize="xs" color="gray.600">
+                                                                                {sectionLabel((tpl.section as SectionId) || 'other')}
+                                                                            </Text>
+                                                                            <Text fontSize="xs" color="gray.500">Drag to schedule</Text>
+                                                                        </VStack>
+                                                                    )}
                                                                 </Box>
-                                                            ))}
+                                                            );})}
                                                         </VStack>
                                                     </Box>
                                                 </>
@@ -1726,6 +1933,75 @@ const Navbar = () => {
                                                             </Box>
                                                         );
                                                     })}
+                                                    {(() => {
+                                                        const liveTeacher = {
+                                                            ...item,
+                                                            custom_timeblocks: customTimeblocks?.length
+                                                                ? customTimeblocks
+                                                                : (item?.custom_timeblocks || []),
+                                                        };
+                                                        const data = computeSectionBreakdown(
+                                                            liveTeacher,
+                                                            subjects,
+                                                            meetings || [],
+                                                            customBlockTemplates || []
+                                                        );
+                                                        return (
+                                                            <Box
+                                                                w="100%"
+                                                                border="1px solid"
+                                                                borderColor="teal.300"
+                                                                borderRadius="md"
+                                                                p={3}
+                                                                bg="teal.50"
+                                                                mt={1}
+                                                            >
+                                                                <Text fontWeight="bold" fontSize="md" mb={1}>
+                                                                    By section
+                                                                </Text>
+                                                                <Text fontSize="xs" color="gray.600" mb={2}>
+                                                                    Share of teaching time (prep & Break excluded)
+                                                                </Text>
+                                                                {data.total === 0 ? (
+                                                                    <Text fontSize="sm" color="gray.500">No scheduled teaching time</Text>
+                                                                ) : (
+                                                                    <VStack align="stretch" spacing={1.5}>
+                                                                        {SECTIONS.map((sec) => {
+                                                                            const mins = data.minutes[sec.id];
+                                                                            if (mins <= 0) return null;
+                                                                            const pct = data.percents[sec.id];
+                                                                            return (
+                                                                                <Box key={sec.id}>
+                                                                                    <HStack justify="space-between">
+                                                                                        <Text fontSize="sm">{sec.label}</Text>
+                                                                                        <Text fontSize="sm" fontWeight="bold">
+                                                                                            {pct}%
+                                                                                        </Text>
+                                                                                    </HStack>
+                                                                                    <Box
+                                                                                        h="6px"
+                                                                                        bg="teal.100"
+                                                                                        borderRadius="full"
+                                                                                        overflow="hidden"
+                                                                                    >
+                                                                                        <Box
+                                                                                            h="100%"
+                                                                                            w={`${Math.min(100, pct)}%`}
+                                                                                            bg="teal.400"
+                                                                                            borderRadius="full"
+                                                                                        />
+                                                                                    </Box>
+                                                                                    <Text fontSize="xs" color="gray.500">
+                                                                                        {formatHours(mins)}
+                                                                                    </Text>
+                                                                                </Box>
+                                                                            );
+                                                                        })}
+                                                                    </VStack>
+                                                                )}
+                                                            </Box>
+                                                        );
+                                                    })()}
                                                 </>
                                             );
                                         })()}

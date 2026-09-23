@@ -33,6 +33,7 @@ import {FaThumbtack} from "react-icons/fa";
 import { useNavigate, Link } from 'react-router-dom';
 import { usePageTitle } from '../utils/usePageTitle';
 import { API_BASE, getSubjectsFromCache, loadAllSubjects, loadUserSelf } from '../utils/apiClient';
+import { hasClearSectionInName } from '../utils/sections';
 
 interface User {
     full_name: string;
@@ -147,6 +148,9 @@ function Subjects() {
     const [currentSubject, setCurrentSubject] = useState<any>(null);
     const [pinnedSubjectIds, setPinnedSubjectIds] = useState<string[]>([]);
     const [duplicateTimeblocks, setDuplicateTimeblocks] = useState(false);
+    const [unclearTitleClicks, setUnclearTitleClicks] = useState(0);
+    const [showUnclearPeriods, setShowUnclearPeriods] = useState(false);
+    const unclearClickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const navigate = useNavigate();
     useEffect(() => {
         const storedPinned = localStorage.getItem('pinned_subject_ids');
@@ -256,6 +260,25 @@ function Subjects() {
             </Box>
         );
     }
+    const handleSubjectsTitleClick = () => {
+        if (unclearClickTimer.current) clearTimeout(unclearClickTimer.current);
+        const next = unclearTitleClicks + 1;
+        if (next >= 5) {
+            setShowUnclearPeriods(true);
+            setUnclearTitleClicks(0);
+            return;
+        }
+        setUnclearTitleClicks(next);
+        unclearClickTimer.current = setTimeout(() => setUnclearTitleClicks(0), 2000);
+    };
+
+    const unclearSubjects = subjects.filter((s) => !hasClearSectionInName(s));
+
+    const formatPeriodLabel = (subject: any) => {
+        const name = subject?.name || subject?.displayname || 'Untitled';
+        const dc = String(subject?.displayclass || '').trim();
+        return dc && dc !== '-' && dc !== '.' ? `${name} (${dc})` : name;
+    };
     const togglePin = (subjectId: string) => {
         setPinnedSubjectIds(prev => {
             const isPinned = prev.includes(subjectId);
@@ -376,7 +399,104 @@ function Subjects() {
     return (
         <Box p={1}>
             <VStack align="center" justify="center" spacing={3}>
-                <Heading size="lg">Subjects</Heading>
+                <Heading
+                    size="lg"
+                    cursor="default"
+                    userSelect="none"
+                    onClick={handleSubjectsTitleClick}
+                >
+                    Subjects
+                </Heading>
+                {showUnclearPeriods && (
+                    <Box
+                        w="100%"
+                        maxW="720px"
+                        border="1px solid"
+                        borderColor="orange.300"
+                        bg="orange.50"
+                        borderRadius="md"
+                        p={3}
+                    >
+                        <HStack justify="space-between" mb={2}>
+                            <Heading size="sm">
+                                Unclear section periods ({unclearSubjects.length})
+                            </Heading>
+                            <Button size="xs" variant="ghost" onClick={() => setShowUnclearPeriods(false)}>
+                                Hide
+                            </Button>
+                        </HStack>
+                        <Text fontSize="xs" color="gray.600" mb={2}>
+                            Subjects whose name/class does not clearly map to Primary, Elementary, Middle, or High School Boys/Girls.
+                        </Text>
+                        {unclearSubjects.length === 0 ? (
+                            <Text fontSize="sm" color="gray.500">All subjects have a clear section.</Text>
+                        ) : (
+                            <VStack
+                                align="stretch"
+                                spacing={1}
+                                maxH="320px"
+                                overflowY="auto"
+                                borderWidth="1px"
+                                borderColor="orange.200"
+                                borderRadius="md"
+                                p={2}
+                                bg="white"
+                            >
+                                {unclearSubjects
+                                    .slice()
+                                    .sort((a, b) => formatPeriodLabel(a).localeCompare(formatPeriodLabel(b)))
+                                    .flatMap((s) => {
+                                        const id = s._id?.$oid || s._id;
+                                        const label = formatPeriodLabel(s);
+                                        const blocks = Array.isArray(s.timeblocks) ? s.timeblocks : [];
+                                        if (!blocks.length) {
+                                            return [{
+                                                key: `${id}-none`,
+                                                id,
+                                                label,
+                                                when: 'No periods scheduled',
+                                            }];
+                                        }
+                                        return blocks.map((tb: any, idx: number) => {
+                                            const day = tb?.start?.day || tb?.startday || '?';
+                                            const start = tb?.start?.time || tb?.starttime || '?';
+                                            const end = tb?.end?.time || tb?.endtime || '?';
+                                            return {
+                                                key: `${id}-${tb?.blockid || tb?.id || idx}`,
+                                                id,
+                                                label,
+                                                when: `${day} ${start}–${end}`,
+                                            };
+                                        });
+                                    })
+                                    .map((row) => (
+                                        <HStack
+                                            key={row.key}
+                                            justify="space-between"
+                                            fontSize="sm"
+                                            py={1}
+                                            borderBottomWidth="1px"
+                                            borderColor="gray.100"
+                                            align="start"
+                                        >
+                                            <Box flex={1}>
+                                                <Text noOfLines={2}>{row.label}</Text>
+                                                <Text fontSize="xs" color="gray.500">{row.when}</Text>
+                                            </Box>
+                                            <Button
+                                                as={Link}
+                                                to={`/schedule/Subject/${row.id}`}
+                                                size="xs"
+                                                variant="outline"
+                                            >
+                                                Open
+                                            </Button>
+                                        </HStack>
+                                    ))}
+                            </VStack>
+                        )}
+                    </Box>
+                )}
                 <HStack w="full" align="center" justify="center" spacing={5}>
                     <Input
                         placeholder="Search subjects..."

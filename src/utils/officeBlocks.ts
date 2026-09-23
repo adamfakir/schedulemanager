@@ -64,6 +64,7 @@ export const normalizeCustomTimeblock = (tb: any) => {
     const timeblockId = String(tb?.timeblockId || tb?.blockid || tb?.id || '');
     const name = tb?.name || 'Note';
     const color = tb?.color || DEFAULT_CUSTOM_COLOR;
+    const section = String(tb?.section || '');
     return {
         subjectId: customSubjectId(templateId),
         isCustom: true,
@@ -74,6 +75,7 @@ export const normalizeCustomTimeblock = (tb: any) => {
         blockid: timeblockId,
         color,
         name,
+        section,
         displayclass: '',
     };
 };
@@ -124,6 +126,7 @@ export const customPayloadFromTimeblocks = (blocks: any[]) =>
         template_id: getTemplateIdFromBlock(tb),
         name: tb.name,
         color: tb.color || DEFAULT_CUSTOM_COLOR,
+        section: String(tb.section || ''),
     }));
 
 export const meetingTimeblockPayload = (blocks: any[], meetingId: string) =>
