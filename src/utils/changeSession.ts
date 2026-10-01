@@ -20,16 +20,13 @@ type FingerprintRow = {
     p: boolean;
     m: boolean;
     c: boolean;
-    /** Sorted teacher IDs only (never display names) — renames must not dirty fingerprints. */
+    /** Sorted teacher IDs when includeTeachers; otherwise empty. Never display names. */
     t: string;
 };
 
 /**
  * Canonical schedule encoding for change-session diffs.
- * Compares where/what blocks are, not display labels of people.
- * - Omits co-attendee names on meetings (remove X from a meeting → only X changes)
- * - Teacher rename does not change anyone's fingerprint
- * - Student rows may include sorted teacher IDs so reassignment still counts
+ * Default student mode matches "hide teacher names": only block times/subjects matter.
  */
 export const canonicalizeFingerprintRows = (rows: FingerprintRow[]): string => {
     const sorted = [...rows].sort((a, b) => {
@@ -55,7 +52,6 @@ export const teacherBlocksToFingerprintRows = (blocks: ScheduleBlock[]): Fingerp
         s: b.start?.time || '',
         e: b.end?.time || '',
         sid: b.subjectId || '',
-        // Meeting/custom titles matter for "what is this block"; subject display names do not (sid covers it).
         n: b.isMeeting || b.isCustom ? (b.name || '') : '',
         dc: b.displayclass || '',
         p: !!b.isPrep,
@@ -74,11 +70,16 @@ const normalizeBlockTimes = (tb: any): { day: string; start: string; end: string
     return { day: startDay, start, end };
 };
 
-/** Student schedule rows with assigned teacher IDs (stable under rename). */
+/**
+ * Student schedule rows.
+ * includeTeachers=false (default): same idea as PDF "hide teacher names" — only classes/times.
+ * includeTeachers=true: also fingerprints who teaches each block (by teacher id).
+ */
 export const studentToFingerprintRows = (
     student: any,
     subjects: any[],
-    teachers: any[]
+    teachers: any[],
+    includeTeachers = false
 ): FingerprintRow[] => {
     const requiredIds = new Set<string>((student?.required_classes || []).map((rc: any) => getSubjectIdRef(rc)));
     const subjectById = new Map<string, any>(subjects.map((s) => [getEntityId(s), s]));
@@ -91,11 +92,15 @@ export const studentToFingerprintRows = (
             const times = normalizeBlockTimes(tb);
             if (!times) return;
             const tbId = getTimeblockId(tb);
-            const teacherIds = (teachers || [])
-                .filter((t: any) => isTeacherAssignedForSubjectBlock(t, subjId, tbId))
-                .map((t: any) => getEntityId(t))
-                .filter(Boolean)
-                .sort();
+            let teacherKey = '';
+            if (includeTeachers) {
+                teacherKey = (teachers || [])
+                    .filter((t: any) => isTeacherAssignedForSubjectBlock(t, subjId, tbId))
+                    .map((t: any) => getEntityId(t))
+                    .filter(Boolean)
+                    .sort()
+                    .join('|');
+            }
             rows.push({
                 d: times.day,
                 s: times.start,
@@ -106,7 +111,7 @@ export const studentToFingerprintRows = (
                 p: false,
                 m: false,
                 c: false,
-                t: teacherIds.join('|'),
+                t: teacherKey,
             });
         });
     });
@@ -114,7 +119,6 @@ export const studentToFingerprintRows = (
     return rows;
 };
 
-/** Stable short fingerprint of schedule content. */
 export const fingerprintRows = (rows: FingerprintRow[]): string =>
     hashCanonical(canonicalizeFingerprintRows(rows));
 
@@ -147,13 +151,16 @@ export const computeTeacherFingerprints = (
 export const computeStudentFingerprints = (
     students: any[],
     subjects: any[],
-    teachers: any[]
+    teachers: any[],
+    includeTeachers = false
 ): Record<string, string> => {
     const out: Record<string, string> = {};
     for (const student of students || []) {
         const id = getEntityId(student);
         if (!id) continue;
-        out[id] = fingerprintRows(studentToFingerprintRows(student, subjects, teachers));
+        out[id] = fingerprintRows(
+            studentToFingerprintRows(student, subjects, teachers, includeTeachers)
+        );
     }
     return out;
 };
@@ -207,6 +214,7 @@ export type ChangeSessionPayload = {
         started_by: string | null;
         teacher_fingerprints: Record<string, string>;
         student_fingerprints: Record<string, string>;
+        student_assignment_fingerprints?: Record<string, string>;
         teacher_count: number;
         student_count: number;
     } | null;
@@ -222,13 +230,15 @@ export const fetchChangeSession = async (token: string): Promise<ChangeSessionPa
 export const startChangeSession = async (
     token: string,
     teacherFingerprints: Record<string, string>,
-    studentFingerprints: Record<string, string>
+    studentFingerprints: Record<string, string>,
+    studentAssignmentFingerprints: Record<string, string> = {}
 ): Promise<ChangeSessionPayload> => {
     const res = await axios.post(
         `${API_BASE}/organization/change_session/start`,
         {
             teacher_fingerprints: teacherFingerprints,
             student_fingerprints: studentFingerprints,
+            student_assignment_fingerprints: studentAssignmentFingerprints,
         },
         { headers: { Authorization: token } }
     );

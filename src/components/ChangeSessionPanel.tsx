@@ -64,6 +64,15 @@ const ChangeSessionPanel: React.FC<Props> = ({ focus }) => {
     const [changedTeachers, setChangedTeachers] = useState<ChangedEntity[]>([]);
     const [changedStudents, setChangedStudents] = useState<ChangedEntity[]>([]);
     const [error, setError] = useState<string | null>(null);
+    /** Default off: student diffs ignore who teaches (like hide teacher names). */
+    const [countTeacherAssignments, setCountTeacherAssignments] = useState(false);
+    const [reviewData, setReviewData] = useState<{
+        teachers: any[];
+        students: any[];
+        subjects: any[];
+        meetings: any[];
+        session: NonNullable<ChangeSessionPayload['session']>;
+    } | null>(null);
 
     const { isOpen, onOpen, onClose } = useDisclosure();
 
@@ -117,6 +126,38 @@ const ChangeSessionPanel: React.FC<Props> = ({ focus }) => {
         };
     };
 
+    const applyReviewDiffs = (
+        session: NonNullable<ChangeSessionPayload['session']>,
+        teachers: any[],
+        students: any[],
+        subjects: any[],
+        meetings: any[],
+        includeAssignments: boolean
+    ) => {
+        const currentTeacherFps = computeTeacherFingerprints(teachers, subjects, meetings);
+        setChangedTeachers(
+            diffEntityFingerprints(session.teacher_fingerprints, teachers, currentTeacherFps)
+        );
+
+        const useAssignments =
+            includeAssignments &&
+            session.student_assignment_fingerprints &&
+            Object.keys(session.student_assignment_fingerprints).length > 0;
+
+        const baselineStudentFps = useAssignments
+            ? session.student_assignment_fingerprints
+            : session.student_fingerprints;
+        const currentStudentFps = computeStudentFingerprints(
+            students,
+            subjects,
+            teachers,
+            !!useAssignments
+        );
+        setChangedStudents(
+            diffEntityFingerprints(baselineStudentFps, students, currentStudentFps)
+        );
+    };
+
     const handleStart = async () => {
         const token = localStorage.getItem('user_token');
         if (!token) return;
@@ -125,9 +166,21 @@ const ChangeSessionPanel: React.FC<Props> = ({ focus }) => {
         try {
             const { subjects, teachers, students, meetings } = await loadScheduleContext(token, true);
             const teacherFingerprints = computeTeacherFingerprints(teachers, subjects, meetings);
-            const studentFingerprints = computeStudentFingerprints(students, subjects, teachers);
-            const data = await startChangeSession(token, teacherFingerprints, studentFingerprints);
+            const studentFingerprints = computeStudentFingerprints(students, subjects, teachers, false);
+            const studentAssignmentFingerprints = computeStudentFingerprints(
+                students,
+                subjects,
+                teachers,
+                true
+            );
+            const data = await startChangeSession(
+                token,
+                teacherFingerprints,
+                studentFingerprints,
+                studentAssignmentFingerprints
+            );
             setSessionState(data);
+            setReviewData(null);
         } catch (err: any) {
             console.error('Failed to start change session', err);
             setError(err?.response?.data?.error || err?.message || 'Failed to start change session');
@@ -149,6 +202,7 @@ const ChangeSessionPanel: React.FC<Props> = ({ focus }) => {
             setSessionState({ active: false, session: null });
             setChangedTeachers([]);
             setChangedStudents([]);
+            setReviewData(null);
             onClose();
         } catch (err: any) {
             console.error('Failed to end change session', err);
@@ -165,30 +219,29 @@ const ChangeSessionPanel: React.FC<Props> = ({ focus }) => {
         setError(null);
         onOpen();
         try {
-            // Refresh session in case fingerprints were updated elsewhere
             const latest = await fetchChangeSession(token);
             setSessionState(latest);
             if (!latest.session) {
                 setChangedTeachers([]);
                 setChangedStudents([]);
+                setReviewData(null);
                 return;
             }
             const { subjects, teachers, students, meetings } = await loadScheduleContext(token, true);
-            const currentTeacherFps = computeTeacherFingerprints(teachers, subjects, meetings);
-            const currentStudentFps = computeStudentFingerprints(students, subjects, teachers);
-            setChangedTeachers(
-                diffEntityFingerprints(
-                    latest.session.teacher_fingerprints,
-                    teachers,
-                    currentTeacherFps
-                )
-            );
-            setChangedStudents(
-                diffEntityFingerprints(
-                    latest.session.student_fingerprints,
-                    students,
-                    currentStudentFps
-                )
+            setReviewData({
+                teachers,
+                students,
+                subjects,
+                meetings,
+                session: latest.session,
+            });
+            applyReviewDiffs(
+                latest.session,
+                teachers,
+                students,
+                subjects,
+                meetings,
+                countTeacherAssignments
             );
         } catch (err: any) {
             console.error('Failed to review change session', err);
@@ -196,6 +249,19 @@ const ChangeSessionPanel: React.FC<Props> = ({ focus }) => {
         } finally {
             setReviewLoading(false);
         }
+    };
+
+    const handleToggleAssignments = (checked: boolean) => {
+        setCountTeacherAssignments(checked);
+        if (!reviewData) return;
+        applyReviewDiffs(
+            reviewData.session,
+            reviewData.teachers,
+            reviewData.students,
+            reviewData.subjects,
+            reviewData.meetings,
+            checked
+        );
     };
 
     const exportChangedTeachers = async () => {
@@ -340,9 +406,23 @@ const ChangeSessionPanel: React.FC<Props> = ({ focus }) => {
                         ) : (
                             <VStack align="stretch" spacing={5}>
                                 <Text fontSize="sm" color="gray.600">
-                                    Only people whose <strong>final schedule</strong> differs from the snapshot are listed.
-                                    Edits that were undone do not count.
+                                    Only people whose <strong>final schedule blocks</strong> differ from the
+                                    snapshot are listed (same idea as PDF with teacher names hidden). Edits
+                                    that were undone do not count.
                                 </Text>
+                                <Checkbox
+                                    isChecked={countTeacherAssignments}
+                                    onChange={(e) => handleToggleAssignments(e.target.checked)}
+                                    size="sm"
+                                    isDisabled={
+                                        !reviewData?.session?.student_assignment_fingerprints ||
+                                        Object.keys(
+                                            reviewData.session.student_assignment_fingerprints || {}
+                                        ).length === 0
+                                    }
+                                >
+                                    Also count who teaches each class (students)
+                                </Checkbox>
 
                                 <ChangedSection
                                     title="Teachers"
