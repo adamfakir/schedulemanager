@@ -36,6 +36,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { usePageTitle } from '../utils/usePageTitle';
 import { API_BASE, getStudentsFromCache, getSubjectsFromCache, getTeachersFromCache, loadAllStudents, loadAllSubjects, loadAllTeachers, loadUserSelf } from '../utils/apiClient';
 import { exportEntitiesSchedulesToPdf } from '../utils/pdfExport';
+import ChangeSessionPanel from '../components/ChangeSessionPanel';
 
 interface User {
     full_name: string;
@@ -294,6 +295,7 @@ function Students() {
         <Box p={1}>
             <VStack align="center" justify="center" spacing={3}>
                 <Heading size="lg">Students</Heading>
+                <ChangeSessionPanel focus="students" />
                 <HStack w="full" align="center" justify="center" spacing={3}>
                     <Input
                         placeholder="Search students..."

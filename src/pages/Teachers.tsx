@@ -42,6 +42,7 @@ import {
     serializeTimeblocksForApi,
 } from '../utils/timeblockIds';
 import { exportEntitiesSchedulesToPdf } from '../utils/pdfExport';
+import ChangeSessionPanel from '../components/ChangeSessionPanel';
 
 interface User {
     full_name: string;
@@ -440,6 +441,7 @@ function Teachers() {
         <Box p={1}>
             <VStack align="center" justify="center" spacing={3}>
                 <Heading size="lg">Teachers</Heading>
+                <ChangeSessionPanel focus="teachers" />
                 <HStack w="full" align="center" justify="center" spacing={3}>
                     <Input
                         placeholder="Search teachers..."

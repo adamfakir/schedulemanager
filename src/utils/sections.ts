@@ -204,13 +204,17 @@ const blockMinutes = (tb: any): number => {
     return mins > 0 ? mins : 0;
 };
 
-/** Custom "Break" blocks are ignored in section % (same idea as prep). */
-const isBreakName = (name: unknown): boolean =>
-    String(name || '').trim().toLowerCase() === 'break';
+/** Custom/meeting names containing Prep or Break, or named Commute, are ignored in section %. */
+const isIgnoredOfficeName = (name: unknown): boolean => {
+    const n = String(name || '').trim().toLowerCase();
+    if (!n) return false;
+    if (n === 'commute' || n.includes('commute')) return true;
+    return /\bprep\b/.test(n) || /\bbreak\b/.test(n);
+};
 
 /**
  * Teaching-load minutes by section for a teacher.
- * Prep and custom blocks named "Break" are excluded.
+ * Names containing Prep/Break (and Commute) are excluded, same idea as built-in prep.
  * Meetings/custom without a section → Other.
  * Per-teacher per-block overrides in teacher.block_sections win over name inference.
  */
@@ -262,7 +266,7 @@ export const computeSectionBreakdown = (
     (teacher?.custom_timeblocks || []).forEach((tb: any) => {
         const tid = String(tb?.template_id || tb?.templateId || '');
         const name = tb?.name || (tid ? templateName.get(tid) : '') || '';
-        if (isBreakName(name) || (tid && isBreakName(templateName.get(tid)))) return;
+        if (isIgnoredOfficeName(name) || (tid && isIgnoredOfficeName(templateName.get(tid)))) return;
         const section = tid && templateSection.has(tid)
             ? (templateSection.get(tid) as SectionId)
             : normalizeStoredSection(tb?.section);
@@ -270,7 +274,7 @@ export const computeSectionBreakdown = (
     });
 
     (meetings || []).forEach((meeting: any) => {
-        if (isBreakName(meeting?.name)) return;
+        if (isIgnoredOfficeName(meeting?.name)) return;
         const section = normalizeStoredSection(meeting?.section);
         (meeting.timeblocks || []).forEach((tb: any) => {
             minutes[section] += blockMinutes(tb);

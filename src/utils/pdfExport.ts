@@ -14,6 +14,11 @@ import {
     minutesToTime,
     shouldUseSeparateFridayTimes,
 } from './scheduleData';
+import {
+    SECTIONS,
+    SectionBreakdown,
+    computeSectionBreakdown,
+} from './sections';
 
 export type PdfExportProgress = {
     current: number;
@@ -26,6 +31,7 @@ type RenderOptions = {
     name: string;
     blocks: ScheduleBlock[];
     hours?: HoursSummary | null;
+    sectionBreakdown?: SectionBreakdown | null;
     includeHours?: boolean;
     excludeEmptyHours?: boolean;
     hideTeacherNames?: boolean;
@@ -382,7 +388,8 @@ const drawHoursPanel = (
     hours: HoursSummary,
     excludeEmpty: boolean,
     x: number,
-    y: number
+    y: number,
+    sectionBreakdown?: SectionBreakdown | null
 ): number => {
     let cy = y;
     ctx.fillStyle = COLORS.title;
@@ -460,7 +467,77 @@ const drawHoursPanel = (
         cy += cardH + 7;
     });
 
+    if (sectionBreakdown) {
+        cy += 6;
+        const rows = SECTIONS.filter((s) => sectionBreakdown.minutes[s.id] > 0);
+        const bodyH = rows.length
+            ? rows.length * 34 + 8
+            : 28;
+        const cardH = 36 + bodyH;
+        fillStrokeRect(ctx, x, cy, HOURS_WIDTH, cardH, COLORS.hoursAccent, COLORS.hoursAccentStroke, 8);
+        ctx.fillStyle = COLORS.title;
+        ctx.font = `600 12px ${FONT}`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText('By section', x + 12, cy + 8);
+        ctx.font = `9px ${FONT}`;
+        ctx.fillStyle = COLORS.mutedText;
+        ctx.fillText('Prep / Break / Commute excluded', x + 12, cy + 24);
+
+        let rowY = cy + 40;
+        if (!rows.length) {
+            ctx.font = `10px ${FONT}`;
+            ctx.fillStyle = COLORS.mutedText;
+            ctx.fillText('No scheduled teaching time', x + 12, rowY);
+        } else {
+            rows.forEach((sec) => {
+                const mins = sectionBreakdown.minutes[sec.id];
+                const pct = sectionBreakdown.percents[sec.id];
+                ctx.fillStyle = COLORS.title;
+                ctx.font = `600 10px ${FONT}`;
+                ctx.textAlign = 'left';
+                ctx.fillText(sec.label, x + 12, rowY);
+                ctx.textAlign = 'right';
+                ctx.fillText(`${pct}%`, x + HOURS_WIDTH - 12, rowY);
+                ctx.textAlign = 'left';
+                // bar track
+                const barX = x + 12;
+                const barW = HOURS_WIDTH - 24;
+                const barY = rowY + 14;
+                ctx.fillStyle = '#c5d5e0';
+                ctx.fillRect(barX, barY, barW, 5);
+                const fillW = Math.max(0, Math.min(barW, (pct / 100) * barW));
+                if (fillW > 0) {
+                    ctx.fillStyle = COLORS.hoursAccentStroke;
+                    ctx.fillRect(barX, barY, fillW, 5);
+                }
+                ctx.font = `9px ${FONT}`;
+                ctx.fillStyle = COLORS.mutedText;
+                ctx.fillText(formatHoursLabel(mins), x + 12, rowY + 22);
+                rowY += 34;
+            });
+        }
+        cy += cardH + 7;
+    }
+
     return cy - y;
+};
+
+const estimateHoursPanelHeight = (
+    hours: HoursSummary,
+    excludeEmpty: boolean,
+    sectionBreakdown?: SectionBreakdown | null
+): number => {
+    let h = 20 + (excludeEmpty ? 16 : 0) + 70;
+    hours.days.forEach((d) => {
+        h += (d.earliest ? 54 : 40) + 7;
+    });
+    if (sectionBreakdown) {
+        const rows = SECTIONS.filter((s) => sectionBreakdown.minutes[s.id] > 0);
+        const bodyH = rows.length ? rows.length * 34 + 8 : 28;
+        h += 6 + 36 + bodyH + 7;
+    }
+    return h;
 };
 
 type TimeAxis = {
@@ -746,8 +823,8 @@ const renderScheduleCanvas = (opts: RenderOptions): HTMLCanvasElement => {
 
     const titleBlockH = 34;
     const contentW = gridW + (showHours ? HOURS_GAP + HOURS_WIDTH : 0);
-    const hoursH = showHours
-        ? 20 + (opts.excludeEmptyHours ? 16 : 0) + 70 + opts.hours!.days.length * 61
+    const hoursH = showHours && opts.hours
+        ? estimateHoursPanelHeight(opts.hours, !!opts.excludeEmptyHours, opts.sectionBreakdown)
         : 0;
     const contentH = Math.max(gridH, hoursH);
     const canvasW = PAGE_PAD * 2 + contentW;
@@ -837,7 +914,8 @@ const renderScheduleCanvas = (opts: RenderOptions): HTMLCanvasElement => {
             opts.hours,
             !!opts.excludeEmptyHours,
             gridX + gridW + HOURS_GAP,
-            gridY
+            gridY,
+            opts.sectionBreakdown
         );
     }
 
@@ -927,11 +1005,22 @@ export async function exportEntitiesSchedulesToPdf(params: {
                 ? computeTeacherHours(entity, subjects, entityMeetings)
                 : null;
 
+        const sectionBreakdown =
+            type === 'Teacher' && includeHours
+                ? computeSectionBreakdown(
+                    entity,
+                    subjects,
+                    entityMeetings,
+                    entity.custom_block_templates || []
+                )
+                : null;
+
         const canvas = renderScheduleCanvas({
             type,
             name,
             blocks,
             hours,
+            sectionBreakdown,
             includeHours,
             excludeEmptyHours,
             hideTeacherNames,

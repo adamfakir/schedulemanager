@@ -1960,7 +1960,7 @@ const Navbar = () => {
                                                                     By section
                                                                 </Text>
                                                                 <Text fontSize="xs" color="gray.600" mb={2}>
-                                                                    Share of teaching time (prep & Break excluded)
+                                                                    Share of teaching time (prep / Break / Commute excluded)
                                                                 </Text>
                                                                 {data.total === 0 ? (
                                                                     <Text fontSize="sm" color="gray.500">No scheduled teaching time</Text>
